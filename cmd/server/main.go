@@ -90,11 +90,11 @@ func main() {
 	// ── Step 5: Connect Redis tick subscriber ────────────────────────────────
 	// Subscribes to pattern tick:* — receives all symbol ticks from pricing-service.
 	// Ticks are pushed into sub.TickCh (buffered channel, 50k cap).
-	sub := redisSubscriber.NewSubscriber(cfg.RedisAddr, cfg.RedisPassword)
+	sub := redisSubscriber.NewSubscriber(cfg.RedisNodes, cfg.RedisPassword)
 	defer sub.Close()
 
 	go sub.Start(ctx)
-	slog.Info("redis tick subscriber started", "addr", cfg.RedisAddr)
+	slog.Info("redis tick subscriber started", "nodes", cfg.RedisNodes)
 
 	// ── Step 6: Build the Tick Processor ────────────────────────────────────
 	// Reads from sub.TickCh, evaluates PnL delta + margin level for each tick.

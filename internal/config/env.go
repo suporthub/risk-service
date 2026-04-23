@@ -42,9 +42,10 @@ type Config struct {
 
 	// ── Infrastructure ─────────────────────────────────────────────────────
 
-	// RedisAddr is the host:port of the Redis server that publishes tick data.
-	// Tick channel pattern: tick:*  (e.g. tick:EURUSD)
-	RedisAddr string
+	// RedisNodes is the list of Redis cluster seed nodes (host:port).
+	// Parsed from comma-separated REDIS_CLUSTER_NODES env var.
+	// The cluster client discovers all other nodes automatically.
+	RedisNodes []string
 
 	// RedisPassword is the AUTH password for Redis. Empty string = no auth.
 	RedisPassword string
@@ -75,8 +76,8 @@ func Load() *Config {
 	cfg := &Config{
 		StopOutPct:        parseFloat("RISK_STOP_OUT_PCT", 50.0),
 		MarginCallPct:     parseFloat("RISK_MARGIN_CALL_PCT", 100.0),
-		RedisAddr:         requireEnv("REDIS_ADDR"),
-		RedisPassword:     os.Getenv("REDIS_PASSWORD"), // optional
+		RedisNodes:        parseStringSlice("REDIS_CLUSTER_NODES", ","),
+		RedisPassword:     os.Getenv("REDIS_PASSWORD"),
 		KafkaBrokers:      parseStringSlice("KAFKA_BROKERS", ","),
 		KafkaGroupID:      envOrDefault("KAFKA_GROUP_ID", "risk-service"),
 		ExecutionGRPCAddr: requireEnv("EXECUTION_GRPC_ADDR"),
@@ -85,7 +86,7 @@ func Load() *Config {
 	slog.Info("risk-service config loaded",
 		"stop_out_pct",    cfg.StopOutPct,
 		"margin_call_pct", cfg.MarginCallPct,
-		"redis_addr",      cfg.RedisAddr,
+		"redis_nodes",    cfg.RedisNodes,
 		"kafka_brokers",   cfg.KafkaBrokers,
 		"grpc_addr",       cfg.ExecutionGRPCAddr,
 	)
