@@ -27,6 +27,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -47,11 +48,18 @@ func main() {
 	// Detect by env var — same pattern used by execution-service.
 	// Declared as slog.Handler interface so both TextHandler and JSONHandler
 	// can be assigned without a type mismatch.
-	var logHandler slog.Handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+	// Multi-writer to log to both stdout and a persistent file
+	logFile, err := os.OpenFile("/app/logs/risk-service.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
+	var logWriter io.Writer = os.Stdout
+	if err == nil {
+		logWriter = io.MultiWriter(os.Stdout, logFile)
+	}
+
+	var logHandler slog.Handler = slog.NewTextHandler(logWriter, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	})
 	if os.Getenv("ENV") == "production" {
-		logHandler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		logHandler = slog.NewJSONHandler(logWriter, &slog.HandlerOptions{
 			Level: slog.LevelInfo,
 		})
 	}
