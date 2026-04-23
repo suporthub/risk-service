@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master, develop]
+
+jobs:
+  deploy-to-k3s:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+      - name: Deploy securely over SSH (Direct Build)
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            set -e
+            cd /v3/risk-service
+            
+            # Force server to match GitHub exactly
+            git fetch origin
+            git reset --hard origin/${{ github.ref_name }}
+            
+            # Get short SHA for precise tagging
+            export SHA=$(git rev-parse --short HEAD)
+
+            # Build the fresh local image natively (no-cache to ensure updates)
+            docker build --no-cache -t risk-service:${SHA} .
+            
+            # Save and import it directly into the cluster runtime
+            docker save risk-service:${SHA} | sudo k3s ctr images import -
+            
+            # Ensure the deployment manifest matches the repo
+            kubectl apply -f /v3/k8s/risk-service-deployment.yaml
+            
+            # Update the deployment to use the new precise image tag
+            kubectl set image deployment/risk-service risk-service=risk-service:${SHA} -n default
