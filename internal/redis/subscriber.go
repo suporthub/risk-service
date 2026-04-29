@@ -20,8 +20,10 @@ package redis
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -44,12 +46,21 @@ type Subscriber struct {
 }
 
 // NewSubscriber creates a Subscriber connected to the Redis cluster.
-//
-// addrs is a slice of seed node addresses (host:port).
-// password is the Redis AUTH password; pass "" if no auth is configured.
-// The TickCh buffer size of 50,000 provides ~5 seconds of burst headroom
-// at 1,000 symbols × 10 ticks/sec peak load.
 func NewSubscriber(addrs []string, password string) *Subscriber {
+	// Parse REDIS_NAT_MAP if available
+	natMapStr := os.Getenv("REDIS_NAT_MAP")
+
+	type natEntry struct {
+		Host string `json:"host"`
+		Port int    `json:"port"`
+	}
+	var parsedNatMap map[string]natEntry
+	if natMapStr != "" {
+		if err := json.Unmarshal([]byte(natMapStr), &parsedNatMap); err != nil {
+			slog.Warn("failed to parse REDIS_NAT_MAP", "error", err)
+		}
+	}
+
 	client := goredis.NewClusterClient(&goredis.ClusterOptions{
 		Addrs:    addrs,
 		Password: password,
@@ -60,6 +71,15 @@ func NewSubscriber(addrs []string, password string) *Subscriber {
 		DialTimeout:  2 * time.Second,
 		ReadTimeout:  0, // no timeout on reads — pub/sub blocks until data arrives
 		WriteTimeout: 2 * time.Second,
+
+		NewClient: func(opt *goredis.Options) *goredis.Client {
+			if parsedNatMap != nil {
+				if mapped, ok := parsedNatMap[opt.Addr]; ok {
+					opt.Addr = fmt.Sprintf("%s:%d", mapped.Host, mapped.Port)
+				}
+			}
+			return goredis.NewClient(opt)
+		},
 	})
 
 	return &Subscriber{
