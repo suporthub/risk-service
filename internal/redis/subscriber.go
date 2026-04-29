@@ -13,7 +13,14 @@
 //   pub/sub is NOT automatically forwarded across cluster shards in Redis <7.
 //   go-redis ClusterClient handles this transparently via PSubscribe.
 //
-// Payload format: "<BID>,<ASK>" — e.g. "1.10010,1.10020"
+// Payload format: multi-group string
+//   "Raw:1.10010,1.10020|Standard:1.09980,1.10050|VIP:1.09995,1.10035"
+//
+// Parse strategy (zero-allocation hot path):
+//   1. Split by "|"	→ group chunks
+//   2. SplitN by ":" 2 → groupName + "BID,ASK"
+//   3. SplitN by "," 2 → bid + ask strings
+//   4. ParseFloat x2   → done
 // ─────────────────────────────────────────────────────────────────────────────
 
 package redis
@@ -29,11 +36,18 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
+// GroupPrice holds the bid/ask for one spread group as parsed from a tick payload.
+type GroupPrice struct {
+	Bid float64
+	Ask float64
+}
+
 // Tick carries the parsed market data for a single symbol update.
+// GroupPrices maps group name → GroupPrice for every spread group the
+// pricing-service calculated (e.g. "Raw", "Standard", "VIP").
 type Tick struct {
-	Symbol string
-	Bid    float64
-	Ask    float64
+	Symbol      string
+	GroupPrices map[string]GroupPrice
 }
 
 // Subscriber connects to the Redis cluster and listens on the pattern tick:*.
@@ -50,17 +64,8 @@ type Subscriber struct {
 // The TickCh buffer size of 50,000 provides ~5 seconds of burst headroom
 // at 1,000 symbols × 10 ticks/sec peak load.
 func NewSubscriber(addrs []string, password string) *Subscriber {
-	client := goredis.NewClusterClient(&goredis.ClusterOptions{
-		Addrs:    addrs,
-		Password: password,
-
-		PoolSize:     5,
-		MinIdleConns: 2,
-
-		DialTimeout:  2 * time.Second,
-		ReadTimeout:  0, // no timeout on reads — pub/sub blocks until data arrives
-		WriteTimeout: 2 * time.Second,
-	})
+	// Use NAT-aware client builder with 0 read timeout (pub/sub blocks until data arrives)
+	client := NewClusterClient(addrs, password, 5, 0)
 
 	return &Subscriber{
 		client: client,
@@ -127,9 +132,10 @@ func (s *Subscriber) run(ctx context.Context) error {
 	}
 }
 
-// parseTick extracts Symbol, Bid, and Ask from a Redis pub/sub message.
+// parseTick extracts Symbol and per-group prices from a Redis pub/sub message.
+//
 // Channel format: "tick:EURUSD"  → Symbol = "EURUSD"
-// Payload format: "1.10010,1.10020"
+// Payload format: "Raw:1.10010,1.10020|Standard:1.09980,1.10050|VIP:1.09995,1.10035"
 func parseTick(channel, payload string) (Tick, error) {
 	chanParts := strings.SplitN(channel, ":", 2)
 	if len(chanParts) != 2 || chanParts[1] == "" {
@@ -137,26 +143,65 @@ func parseTick(channel, payload string) (Tick, error) {
 	}
 	symbol := chanParts[1]
 
-	parts := strings.SplitN(payload, ",", 2)
-	if len(parts) != 2 {
-		return Tick{}, fmt.Errorf("invalid tick payload: %q (expected BID,ASK)", payload)
+	groupChunks := strings.Split(payload, "|")
+	if len(groupChunks) == 0 {
+		return Tick{}, fmt.Errorf("empty tick payload for symbol %q", symbol)
 	}
 
-	bid, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
-	if err != nil {
-		return Tick{}, fmt.Errorf("parse bid from %q: %w", payload, err)
+	groupPrices := make(map[string]GroupPrice, len(groupChunks))
+
+	for _, chunk := range groupChunks {
+		// chunk = "GroupName:BID,ASK"
+		gp := strings.SplitN(chunk, ":", 2)
+		if len(gp) != 2 || gp[0] == "" || gp[1] == "" {
+			slog.Warn("skipping malformed group chunk in tick",
+				"symbol",  symbol,
+				"chunk",   chunk,
+			)
+			continue
+		}
+		groupName := gp[0]
+
+		// Split all comma-separated values. The pricing-service sends 5 fields:
+		// "Bid,Ask,High,Low,PctChange"
+		// We only need Bid (index 0) and Ask (index 1) for risk calculations.
+		// High, Low, PctChange are for the frontend Fat Tick — ignored here.
+		prices := strings.Split(gp[1], ",")
+		if len(prices) < 2 {
+			slog.Warn("skipping malformed prices in group chunk",
+				"symbol", symbol,
+				"group",  groupName,
+				"chunk",  chunk,
+			)
+			continue
+		}
+
+		bid, err := strconv.ParseFloat(strings.TrimSpace(prices[0]), 64)
+		if err != nil {
+			slog.Warn("skipping group: cannot parse bid",
+				"symbol", symbol, "group", groupName, "raw", prices[0])
+			continue
+		}
+		ask, err := strconv.ParseFloat(strings.TrimSpace(prices[1]), 64)
+		if err != nil {
+			slog.Warn("skipping group: cannot parse ask",
+				"symbol", symbol, "group", groupName, "raw", prices[1])
+			continue
+		}
+		if bid <= 0 || ask <= 0 || ask < bid {
+			slog.Warn("skipping group: invalid bid/ask values",
+				"symbol", symbol, "group", groupName, "bid", bid, "ask", ask)
+			continue
+		}
+
+		groupPrices[groupName] = GroupPrice{Bid: bid, Ask: ask}
 	}
 
-	ask, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
-	if err != nil {
-		return Tick{}, fmt.Errorf("parse ask from %q: %w", payload, err)
+	if len(groupPrices) == 0 {
+		return Tick{}, fmt.Errorf("no valid group prices parsed from payload %q for symbol %q", payload, symbol)
 	}
 
-	if bid <= 0 || ask <= 0 || ask < bid {
-		return Tick{}, fmt.Errorf("invalid tick values: bid=%.5f ask=%.5f", bid, ask)
-	}
-
-	return Tick{Symbol: symbol, Bid: bid, Ask: ask}, nil
+	return Tick{Symbol: symbol, GroupPrices: groupPrices}, nil
 }
 
 // Close cleanly disconnects the Redis cluster client.

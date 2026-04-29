@@ -51,6 +51,8 @@ type RiskPosition struct {
 	TicketID     string  // UUID v4 — stable identifier across all services
 	UserID       string  // back-reference to the owning RiskUser (for O(1) SymbolIndex routing)
 	Symbol       string  // e.g. "EURUSD", "XAUUSD"
+	Group        string  // spread-group name (e.g. "Standard", "VIP") — used to select the correct
+	              //   bid/ask from the multi-group tick payload; must match the pricing-service key.
 	OrderType    string  // "BUY" or "SELL"
 	Volume       float64 // lot size (e.g. 0.01, 1.0)
 	OpenPrice    float64 // execution fill price

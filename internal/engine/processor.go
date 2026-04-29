@@ -7,6 +7,9 @@
 // It runs on every single market tick and determines whether any user needs
 // to be liquidated.
 //
+// Payload format on tick:<SYMBOL>:
+//   "Raw:1.10010,1.10020|Standard:1.09980,1.10050|VIP:1.09995,1.10035"
+//
 // Hot path algorithm per tick:
 //
 //   1. O(1) symbol lookup:
@@ -19,7 +22,8 @@
 //      Each pos.UserID is the back-reference to look up the owning RiskUser.
 //
 //   3. Per-position delta PnL (inside user.Lock()):
-//        NewPnL = calcPnL(tick, pos)
+//        gp  := tick.GroupPrices[pos.Group]  (falls back to "Raw" if absent)
+//        NewPnL = calcPnL(gp, pos)
 //        Delta  = NewPnL - pos.CurrentPnL
 //        user.TotalFloatingPnL += Delta     ← running sum — no full portfolio scan
 //        pos.CurrentPnL = NewPnL
@@ -169,6 +173,28 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 
 		// ── Step 3: Delta PnL Computation ────────────────────────────────────
 		//
+		// Resolve the group-specific bid/ask for this position.
+		//
+		// pos.Group is the spread-group assigned to the position at open time
+		// (e.g. "Standard", "VIP"). The pricing-service calculated exactly this
+		// spread and sent it in the multi-group tick string — so we are always
+		// using the same price as the execution-service HGET.
+		//
+		// Fallback order:
+		//   1. pos.Group   (correct group price — normal case)
+		//   2. "Raw"       (unspread — if the group was not in this tick)
+		gp, gpOK := tick.GroupPrices[pos.Group]
+		if !gpOK {
+			gp, gpOK = tick.GroupPrices["Raw"]
+			if !gpOK {
+				// No usable price in this tick for this position — skip to avoid
+				// stale PnL arithmetic. The next tick will contain the data.
+				user.Unlock()
+				continue
+			}
+		}
+		bid, ask := gp.Bid, gp.Ask
+		//
 		// PnL formula for USD-denominated accounts (Phase 1 assumption):
 		//
 		//   BUY:  client is long — closes by selling at BID.
@@ -182,9 +208,9 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 		// ContractSize is stored on the position from the Kafka event.
 		var newPnL float64
 		if pos.OrderType == "BUY" {
-			newPnL = (tick.Bid - pos.OpenPrice) * pos.ContractSize * pos.Volume
+			newPnL = (bid - pos.OpenPrice) * pos.ContractSize * pos.Volume
 		} else { // "SELL"
-			newPnL = (pos.OpenPrice - tick.Ask) * pos.ContractSize * pos.Volume
+			newPnL = (pos.OpenPrice - ask) * pos.ContractSize * pos.Volume
 		}
 
 		// Delta = change in this position's PnL since the last tick.

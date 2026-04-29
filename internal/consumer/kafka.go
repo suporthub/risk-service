@@ -189,6 +189,7 @@ func (c *KafkaConsumer) handleOrderExecuted(data []byte) error {
 		TicketID:     evt.TicketID,
 		UserID:       evt.UserID,       // back-reference: lets tick processor do O(1) user lookup from SymbolIndex
 		Symbol:       evt.Symbol,
+		Group:        evt.GroupName,    // spread-group: selects correct bid/ask from multi-group tick payload
 		OrderType:    evt.OrderSide,
 		Volume:       evt.Volume,
 		OpenPrice:    evt.ExecutionPrice,
@@ -214,7 +215,7 @@ func (c *KafkaConsumer) handleOrderExecuted(data []byte) error {
 	user.Unlock()
 	c.ledger.Unlock()
 
-	slog.Debug("position opened in risk ledger",
+	slog.Info("position opened in risk ledger",
 		"ticket_id",   evt.TicketID,
 		"user_id",     evt.UserID,
 		"symbol",      evt.Symbol,
@@ -287,7 +288,7 @@ func (c *KafkaConsumer) handleOrderClosed(data []byte) error {
 	user.Unlock()
 	c.ledger.Unlock()
 
-	slog.Debug("position closed in risk ledger",
+	slog.Info("position closed in risk ledger",
 		"ticket_id",    evt.TicketID,
 		"user_id",      evt.UserID,
 		"realized_pnl", evt.RealizedPnL,

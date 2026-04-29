@@ -43,7 +43,7 @@ type Config struct {
 	// ── Infrastructure ─────────────────────────────────────────────────────
 
 	// RedisNodes is the list of Redis cluster seed nodes (host:port).
-	// Parsed from comma-separated REDIS_CLUSTER_NODES env var.
+	// Parsed from comma-separated REDIS_NODES env var.
 	// The cluster client discovers all other nodes automatically.
 	RedisNodes []string
 
@@ -76,7 +76,7 @@ func Load() *Config {
 	cfg := &Config{
 		StopOutPct:        parseFloat("RISK_STOP_OUT_PCT", 50.0),
 		MarginCallPct:     parseFloat("RISK_MARGIN_CALL_PCT", 100.0),
-		RedisNodes:        parseStringSlice("REDIS_CLUSTER_NODES", ","),
+		RedisNodes:        parseStringSlice("REDIS_NODES", ","),
 		RedisPassword:     os.Getenv("REDIS_PASSWORD"),
 		KafkaBrokers:      parseStringSlice("KAFKA_BROKERS", ","),
 		KafkaGroupID:      envOrDefault("KAFKA_GROUP_ID", "risk-service"),
