@@ -58,11 +58,6 @@ type Subscriber struct {
 }
 
 // NewSubscriber creates a Subscriber connected to the Redis cluster.
-//
-// addrs is a slice of seed node addresses (host:port).
-// password is the Redis AUTH password; pass "" if no auth is configured.
-// The TickCh buffer size of 50,000 provides ~5 seconds of burst headroom
-// at 1,000 symbols × 10 ticks/sec peak load.
 func NewSubscriber(addrs []string, password string) *Subscriber {
 	// Use NAT-aware client builder with 0 read timeout (pub/sub blocks until data arrives)
 	client := NewClusterClient(addrs, password, 5, 0)
@@ -116,7 +111,7 @@ func (s *Subscriber) run(ctx context.Context) error {
 				slog.Warn("malformed tick payload",
 					"channel", msg.Channel,
 					"payload", msg.Payload,
-					"error",   err,
+					"error", err,
 				)
 				continue
 			}
@@ -155,8 +150,8 @@ func parseTick(channel, payload string) (Tick, error) {
 		gp := strings.SplitN(chunk, ":", 2)
 		if len(gp) != 2 || gp[0] == "" || gp[1] == "" {
 			slog.Warn("skipping malformed group chunk in tick",
-				"symbol",  symbol,
-				"chunk",   chunk,
+				"symbol", symbol,
+				"chunk", chunk,
 			)
 			continue
 		}
@@ -170,8 +165,8 @@ func parseTick(channel, payload string) (Tick, error) {
 		if len(prices) < 2 {
 			slog.Warn("skipping malformed prices in group chunk",
 				"symbol", symbol,
-				"group",  groupName,
-				"chunk",  chunk,
+				"group", groupName,
+				"chunk", chunk,
 			)
 			continue
 		}
