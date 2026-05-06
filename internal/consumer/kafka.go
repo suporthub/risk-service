@@ -42,6 +42,13 @@ import (
 // They MUST stay in sync with OrderExecutedEvent in execution-service/internal/engine/kafka_producer.go
 // ─────────────────────────────────────────────────────────────────────────────
 
+// WalletTransactionEvent is the payload on the wallet.transactions topic.
+type WalletTransactionEvent struct {
+	UserID          string  `json:"user_id"`
+	TransactionType string  `json:"transaction_type"` // "DEPOSIT", "WITHDRAWAL", "CREDIT"
+	Amount          float64 `json:"amount"`
+}
+
 // OrderExecutedEvent is the payload on the orders.executed topic.
 // Published by the execution-service after every successful PlaceOrder.
 type OrderExecutedEvent struct {
@@ -74,8 +81,9 @@ type OrderClosedEvent struct {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const (
-	topicOrdersExecuted = "orders.executed"
-	topicOrdersClosed   = "orders.closed"
+	topicOrdersExecuted  = "orders.executed"
+	topicOrdersClosed    = "orders.closed"
+	topicWalletTransacts = "wallet.transactions"
 
 	// ContractSizeDefault is used when contract size cannot be inferred from
 	// the event. In Phase 1, we default to 100,000 (standard FX lot).
@@ -88,14 +96,16 @@ type KafkaConsumer struct {
 	brokers []string
 	groupID string
 	ledger  *model.GlobalLedger
+	loader  model.BalanceLoader
 }
 
 // NewKafkaConsumer creates a consumer that will hydrate the given ledger.
-func NewKafkaConsumer(brokers []string, groupID string, ledger *model.GlobalLedger) *KafkaConsumer {
+func NewKafkaConsumer(brokers []string, groupID string, ledger *model.GlobalLedger, loader model.BalanceLoader) *KafkaConsumer {
 	return &KafkaConsumer{
 		brokers: brokers,
 		groupID: groupID,
 		ledger:  ledger,
+		loader:  loader,
 	}
 }
 
@@ -106,6 +116,7 @@ func NewKafkaConsumer(brokers []string, groupID string, ledger *model.GlobalLedg
 func (c *KafkaConsumer) Start(ctx context.Context) {
 	go c.consumeLoop(ctx, topicOrdersExecuted, c.handleOrderExecuted)
 	go c.consumeLoop(ctx, topicOrdersClosed, c.handleOrderClosed)
+	go c.consumeLoop(ctx, topicWalletTransacts, c.handleWalletTransaction)
 	slog.Info("kafka consumer started", "brokers", c.brokers, "group", c.groupID)
 }
 
@@ -180,9 +191,11 @@ func (c *KafkaConsumer) handleOrderExecuted(data []byte) error {
 
 	// Get or create the RiskUser with the balance BEFORE commission deduction.
 	// The commission is deducted in the next step so we can log the before/after.
-	// For new users, initialBalance is the execution price × margin — this is
-	// a simplification; Phase 2 should read the real balance from a snapshot topic.
-	user := c.ledger.GetOrCreateUser(evt.UserID, 0.0, 0.0)
+	// Uses the database loader for JIT hydration.
+	user, err := c.ledger.GetOrCreateUser(context.Background(), evt.UserID, 0.0, c.loader)
+	if err != nil {
+		return fmt.Errorf("failed to jit load user %q: %w", evt.UserID, err)
+	}
 
 	// Build the RiskPosition from the event.
 	pos := &model.RiskPosition{
@@ -294,6 +307,45 @@ func (c *KafkaConsumer) handleOrderClosed(data []byte) error {
 		"realized_pnl", evt.RealizedPnL,
 		"margin_freed", evt.MarginReturn,
 	)
+
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Handler: wallet.transactions
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (c *KafkaConsumer) handleWalletTransaction(data []byte) error {
+	var evt WalletTransactionEvent
+	if err := json.Unmarshal(data, &evt); err != nil {
+		return fmt.Errorf("unmarshal wallet.transactions: %w", err)
+	}
+
+	// Look up the user — if not in RAM, they are safe to ignore.
+	// The JIT loader will fetch their post-transaction balance perfectly
+	// next time they open a position.
+	c.ledger.RLock()
+	user, ok := c.ledger.Users[evt.UserID]
+	c.ledger.RUnlock()
+
+	if !ok {
+		return nil // User not in RAM. Safely ignore!
+	}
+
+	// Lock the specific user's state to mutate balance
+	user.Lock()
+	defer user.Unlock()
+
+	switch evt.TransactionType {
+	case "DEPOSIT", "CREDIT":
+		user.Balance += evt.Amount
+		slog.Info("wallet credited in RAM", "user_id", evt.UserID, "amount", evt.Amount, "new_balance", user.Balance)
+	case "WITHDRAWAL":
+		user.Balance -= evt.Amount
+		slog.Info("wallet debited in RAM", "user_id", evt.UserID, "amount", evt.Amount, "new_balance", user.Balance)
+	default:
+		slog.Warn("unknown wallet transaction type", "type", evt.TransactionType)
+	}
 
 	return nil
 }

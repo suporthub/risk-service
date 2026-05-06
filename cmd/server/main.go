@@ -36,6 +36,7 @@ import (
 
 	"github.com/livefxhub/risk-service/internal/config"
 	"github.com/livefxhub/risk-service/internal/consumer"
+	"github.com/livefxhub/risk-service/internal/db"
 	"github.com/livefxhub/risk-service/internal/engine"
 	grpcDispatcher "github.com/livefxhub/risk-service/internal/grpc"
 	"github.com/livefxhub/risk-service/internal/model"
@@ -82,20 +83,31 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// ── Step 4: Start Kafka consumer ─────────────────────────────────────────
+	// ── Step 4: Setup JIT Database Loader ───────────────────────────────────
+	// Connect to the read-replica database to perform JIT balance lookups.
+	dbLoader, err := db.NewLoader(ctx, cfg.DatabaseURL)
+	if err != nil {
+		slog.Error("failed to connect to postgres", "error", err)
+		os.Exit(1)
+	}
+	defer dbLoader.Close()
+	slog.Info("database loader connected")
+
+	// ── Step 5: Start Kafka consumer ─────────────────────────────────────────
 	// Subscribes to orders.executed and orders.closed.
 	// Replays from the last committed offset to rebuild the ledger after restart.
 	kafkaConsumer := consumer.NewKafkaConsumer(
 		cfg.KafkaBrokers,
 		cfg.KafkaGroupID,
 		ledger,
+		dbLoader.LoadInitialBalance,
 	)
 	kafkaConsumer.Start(ctx)
 	slog.Info("kafka consumer started",
-		"topics", strings.Join([]string{"orders.executed", "orders.closed"}, ", "),
+		"topics", strings.Join([]string{"orders.executed", "orders.closed", "wallet.transactions"}, ", "),
 	)
 
-	// ── Step 5: Connect Redis tick subscriber ────────────────────────────────
+	// ── Step 6: Connect Redis tick subscriber ────────────────────────────────
 	// Subscribes to pattern tick:* — receives all symbol ticks from pricing-service.
 	// Ticks are pushed into sub.TickCh (buffered channel, 50k cap).
 	sub := redisSubscriber.NewSubscriber(cfg.RedisNodes, cfg.RedisPassword)

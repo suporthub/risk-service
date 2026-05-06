@@ -39,7 +39,11 @@
 
 package model
 
-import "sync"
+import (
+	"context"
+	"fmt"
+	"sync"
+)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RiskPosition — one open trade tracked by the risk engine.
@@ -200,18 +204,20 @@ func (l *GlobalLedger) RLock() { l.mu.RLock() }
 // RUnlock releases the shared read lock.
 func (l *GlobalLedger) RUnlock() { l.mu.RUnlock() }
 
+type BalanceLoader func(ctx context.Context, userID string) (float64, error)
+
 // GetOrCreateUser returns the RiskUser for the given userID, creating a new
 // one with the provided initial balance and margin if not yet present.
 //
 // Used by the Kafka consumer on orders.executed.
 // Write-lock is held for the minimum duration — only for the map insertion.
-func (l *GlobalLedger) GetOrCreateUser(userID string, initialBalance, initialMargin float64) *RiskUser {
+func (l *GlobalLedger) GetOrCreateUser(ctx context.Context, userID string, initialMargin float64, loader BalanceLoader) (*RiskUser, error) {
 	// Fast path — read lock only.
 	l.mu.RLock()
 	user, ok := l.Users[userID]
 	l.mu.RUnlock()
 	if ok {
-		return user
+		return user, nil
 	}
 
 	// Slow path — write lock for insertion.
@@ -220,17 +226,23 @@ func (l *GlobalLedger) GetOrCreateUser(userID string, initialBalance, initialMar
 
 	// Double-check: another goroutine may have inserted it between RUnlock and Lock.
 	if user, ok = l.Users[userID]; ok {
-		return user
+		return user, nil
+	}
+
+	// JIT Load Balance
+	balance, err := loader(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("jit balance load failed for %q: %w", userID, err)
 	}
 
 	user = &RiskUser{
 		UserID:     userID,
-		Balance:    initialBalance,
+		Balance:    balance,
 		UsedMargin: initialMargin,
 		Positions:  make(map[string]*RiskPosition),
 	}
 	l.Users[userID] = user
-	return user
+	return user, nil
 }
 
 // AddPosition registers a position in both the user's Positions map and the

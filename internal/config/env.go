@@ -60,6 +60,9 @@ type Config struct {
 	// ExecutionGRPCAddr is the host:port of the execution-service gRPC server.
 	// The risk-service dials this address to call ForceLiquidate.
 	ExecutionGRPCAddr string
+
+	// DatabaseURL is the PostgreSQL connection string for JIT hydration.
+	DatabaseURL string
 }
 
 // Load reads configuration from the environment (and optionally .env file).
@@ -81,6 +84,7 @@ func Load() *Config {
 		KafkaBrokers:      parseStringSlice("KAFKA_BROKERS", ","),
 		KafkaGroupID:      envOrDefault("KAFKA_GROUP_ID", "risk-service"),
 		ExecutionGRPCAddr: requireEnv("EXECUTION_GRPC_ADDR"),
+		DatabaseURL:       requireEnv("DATABASE_URL"),
 	}
 
 	slog.Info("risk-service config loaded",
