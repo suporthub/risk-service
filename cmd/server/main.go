@@ -107,7 +107,8 @@ func main() {
 	// ── Step 6: Build the Tick Processor ────────────────────────────────────
 	// Reads from sub.TickCh, evaluates PnL delta + margin level for each tick.
 	// Pushes LiquidationTask to proc.LiquidationCh when stop-out threshold hit.
-	proc := engine.NewProcessor(ledger, cfg)
+	fxConverter := engine.NewFxConverter()
+	proc := engine.NewProcessor(ledger, cfg, fxConverter)
 
 	// ── Step 7: Connect gRPC Dispatcher to execution-service ────────────────
 	// The dispatcher is the only component that makes outbound network calls.

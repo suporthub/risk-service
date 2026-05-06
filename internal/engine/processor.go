@@ -75,6 +75,7 @@ type LiquidationTask struct {
 type Processor struct {
 	ledger        *model.GlobalLedger
 	cfg           *config.Config
+	fxConverter   *FxConverter
 	LiquidationCh chan LiquidationTask // consumed by the Dispatcher goroutine
 }
 
@@ -83,10 +84,11 @@ type Processor struct {
 // The channel buffer size of 1,000 lets the gRPC dispatcher lag by up to 1,000
 // liquidation events without stalling the tick loop. In practice, stop-outs
 // are rare; this buffer provides ample headroom for broker-level spike events.
-func NewProcessor(ledger *model.GlobalLedger, cfg *config.Config) *Processor {
+func NewProcessor(ledger *model.GlobalLedger, cfg *config.Config, fxConverter *FxConverter) *Processor {
 	return &Processor{
 		ledger:        ledger,
 		cfg:           cfg,
+		fxConverter:   fxConverter,
 		LiquidationCh: make(chan LiquidationTask, 1_000),
 	}
 }
@@ -106,6 +108,18 @@ func (p *Processor) Start(ctx context.Context, tickCh <-chan redisSub.Tick) {
 			if !ok {
 				return // channel closed
 			}
+
+			// Update FxConverter with the latest Raw or fallback tick
+			gp, ok := tick.GroupPrices["Raw"]
+			if !ok {
+				// fallback to the first available group if Raw is missing
+				for _, v := range tick.GroupPrices {
+					gp = v
+					break
+				}
+			}
+			p.fxConverter.UpdateRate(tick.Symbol, gp.Bid, gp.Ask)
+
 			p.processTick(tick)
 		}
 	}
@@ -213,13 +227,17 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 			newPnL = (pos.OpenPrice - ask) * pos.ContractSize * pos.Volume
 		}
 
+		// Convert PnL to USD
+		quote := extractQuoteCurrency(tick.Symbol)
+		newPnL_USD := p.fxConverter.ConvertToUSD(newPnL, quote)
+
 		// Delta = change in this position's PnL since the last tick.
 		// We apply ONLY the delta to the user's running total — this avoids
 		// recalculating all other positions' PnL from scratch on every tick.
-		pnlDelta := newPnL - pos.CurrentPnL
+		pnlDelta := newPnL_USD - pos.CurrentPnL
 
 		user.TotalFloatingPnL += pnlDelta // O(1) running total update
-		pos.CurrentPnL = newPnL           // cache for next tick's delta
+		pos.CurrentPnL = newPnL_USD       // cache for next tick's delta
 
 		// ── Step 4: Equity & Margin Level ────────────────────────────────────
 		//
@@ -306,4 +324,15 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 
 		user.Unlock()
 	}
+}
+
+// extractQuoteCurrency returns the 3-character quote currency from a symbol.
+// For standard 6-character FX pairs (EURUSD, GBPJPY, AUDCAD, BTCUSD):
+//   symbol[3:6] is the quote currency.
+// For non-standard symbols, it returns "USD" as a fallback.
+func extractQuoteCurrency(symbol string) string {
+	if len(symbol) == 6 {
+		return symbol[3:6]
+	}
+	return "USD"
 }
