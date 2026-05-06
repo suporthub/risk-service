@@ -48,6 +48,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/livefxhub/risk-service/internal/config"
 	"github.com/livefxhub/risk-service/internal/model"
@@ -73,23 +74,26 @@ type LiquidationTask struct {
 // Processor reads Tick values from the Redis subscriber channel and evaluates
 // risk for every position on the ticking symbol.
 type Processor struct {
-	ledger        *model.GlobalLedger
-	cfg           *config.Config
-	fxConverter   *FxConverter
-	LiquidationCh chan LiquidationTask // consumed by the Dispatcher goroutine
+	ledger            *model.GlobalLedger
+	cfg               *config.Config
+	fxConverter       *FxConverter
+	LiquidationCh     chan LiquidationTask  // consumed by the gRPC liquidation dispatcher
+	notificationQueue chan<- NotificationTask // consumed by the notification dispatcher
 }
 
 // NewProcessor creates a Processor with a pre-allocated liquidation channel.
 //
+// notificationQueue is the send-only channel from NotificationDispatcher.Queue().
 // The channel buffer size of 1,000 lets the gRPC dispatcher lag by up to 1,000
 // liquidation events without stalling the tick loop. In practice, stop-outs
 // are rare; this buffer provides ample headroom for broker-level spike events.
-func NewProcessor(ledger *model.GlobalLedger, cfg *config.Config, fxConverter *FxConverter) *Processor {
+func NewProcessor(ledger *model.GlobalLedger, cfg *config.Config, fxConverter *FxConverter, notificationQueue chan<- NotificationTask) *Processor {
 	return &Processor{
-		ledger:        ledger,
-		cfg:           cfg,
-		fxConverter:   fxConverter,
-		LiquidationCh: make(chan LiquidationTask, 1_000),
+		ledger:            ledger,
+		cfg:               cfg,
+		fxConverter:       fxConverter,
+		LiquidationCh:     make(chan LiquidationTask, 1_000),
+		notificationQueue: notificationQueue,
 	}
 }
 
@@ -311,15 +315,57 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 
 		} else if marginLevel <= p.cfg.MarginCallPct {
 			// ── MARGIN CALL WARNING ───────────────────────────────────────────
-			// No position is closed. Log the warning.
-			// Phase 2: publish a margin-call event to Kafka → notification-service
-			// so a push notification / email is sent to the client.
-			slog.Warn("margin call level reached",
-				"user_id",      user.UserID,
-				"margin_level", fmt.Sprintf("%.2f%%", marginLevel),
-				"symbol",       tick.Symbol,
-				"equity",       equity,
-			)
+			//
+			// Throttle: only send one warning email per hour per user.
+			// user.LastMarginCall is zero-valued on first entry, so time.Since
+			// returns a very large duration and the condition is always true
+			// on the very first warning — perfect.
+			const marginCallCooldown = 1 * time.Hour
+			if time.Since(user.LastMarginCall) > marginCallCooldown {
+				// Stamp BEFORE the non-blocking push so that if the channel is
+				// full on the first attempt, we still back off for an hour rather
+				// than spinning through thousands of ticks trying to enqueue.
+				user.LastMarginCall = time.Now()
+
+				select {
+				case p.notificationQueue <- NotificationTask{
+					UserID:        user.UserID,
+					AccountNumber: user.AccountNumber,
+					Email:         user.Email,
+					MarginLevel:   marginLevel,
+				}:
+					slog.Warn("margin call warning queued",
+						"user_id",      user.UserID,
+						"margin_level", fmt.Sprintf("%.2f%%", marginLevel),
+						"symbol",       tick.Symbol,
+						"equity",       equity,
+					)
+				default:
+					// Notification channel full — dispatcher is lagging.
+					// Roll back the timestamp so the NEXT tick retries the push.
+					user.LastMarginCall = time.Time{}
+					slog.Error("notification channel full — margin call dropped, timestamp rolled back",
+						"user_id", user.UserID,
+					)
+				}
+			}
+		} else if marginLevel >= (p.cfg.MarginCallPct + 10.0) {
+			// ── RECOVERY RESET ────────────────────────────────────────────────
+			//
+			// The user has recovered to a safe margin buffer (10% above the
+			// warning threshold). Reset the throttle so that if they deteriorate
+			// again, they receive a fresh immediate warning rather than waiting
+			// for the 1-hour cooldown window to expire.
+			//
+			// The zero value of time.Time means time.Since returns MaxInt64 —
+			// effectively "never warned", guaranteeing the next warning fires.
+			if !user.LastMarginCall.IsZero() {
+				user.LastMarginCall = time.Time{}
+				slog.Info("margin call throttle reset — user recovered",
+					"user_id",      user.UserID,
+					"margin_level", fmt.Sprintf("%.2f%%", marginLevel),
+				)
+			}
 		}
 
 		user.Unlock()

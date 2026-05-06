@@ -40,6 +40,7 @@ import (
 	"github.com/livefxhub/risk-service/internal/engine"
 	grpcDispatcher "github.com/livefxhub/risk-service/internal/grpc"
 	"github.com/livefxhub/risk-service/internal/model"
+	"github.com/livefxhub/risk-service/internal/producer"
 	redisSubscriber "github.com/livefxhub/risk-service/internal/redis"
 )
 
@@ -94,13 +95,15 @@ func main() {
 	slog.Info("database loader connected")
 
 	// ── Step 5: Start Kafka consumer ─────────────────────────────────────────
-	// Subscribes to orders.executed and orders.closed.
+	// Subscribes to orders.executed, orders.closed, and wallet.transactions.
 	// Replays from the last committed offset to rebuild the ledger after restart.
+	// Uses UserLoader so JIT hydration fetches balance + email + account number.
+	// db.Loader.LoadUserDetails returns *model.UserDetails directly — no adapter needed.
 	kafkaConsumer := consumer.NewKafkaConsumer(
 		cfg.KafkaBrokers,
 		cfg.KafkaGroupID,
 		ledger,
-		dbLoader.LoadInitialBalance,
+		dbLoader.LoadUserDetails,
 	)
 	kafkaConsumer.Start(ctx)
 	slog.Info("kafka consumer started",
@@ -116,11 +119,25 @@ func main() {
 	go sub.Start(ctx)
 	slog.Info("redis tick subscriber started", "nodes", cfg.RedisNodes)
 
-	// ── Step 6: Build the Tick Processor ────────────────────────────────────
+	// ── Step 6b: Notification Kafka Producer & Dispatcher ────────────────────
+	// The producer writes to the notification.send topic.
+	// The dispatcher runs in a background goroutine and drains the queue that
+	// the tick processor populates (non-blocking select in the hot path).
+	notifProducer := producer.NewKafkaProducer(cfg.KafkaBrokers)
+	defer func() {
+		if err := notifProducer.Close(); err != nil {
+			slog.Warn("notification producer close error", "error", err)
+		}
+	}()
+
+	notifDispatcher := engine.NewNotificationDispatcher(notifProducer)
+
+	// ── Step 6c: Build the Tick Processor ───────────────────────────────────
 	// Reads from sub.TickCh, evaluates PnL delta + margin level for each tick.
 	// Pushes LiquidationTask to proc.LiquidationCh when stop-out threshold hit.
+	// Pushes NotificationTask to notifDispatcher.Queue() on margin call.
 	fxConverter := engine.NewFxConverter()
-	proc := engine.NewProcessor(ledger, cfg, fxConverter)
+	proc := engine.NewProcessor(ledger, cfg, fxConverter, notifDispatcher.Queue())
 
 	// ── Step 7: Connect gRPC Dispatcher to execution-service ────────────────
 	// The dispatcher is the only component that makes outbound network calls.
@@ -148,6 +165,7 @@ func main() {
 
 	go proc.Start(ctx, sub.TickCh)
 	go dispatcher.Start(ctx)
+	go notifDispatcher.Start(ctx)
 
 	slog.Info("risk-service fully operational",
 		"stop_out_pct",    cfg.StopOutPct,

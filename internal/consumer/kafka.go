@@ -96,11 +96,11 @@ type KafkaConsumer struct {
 	brokers []string
 	groupID string
 	ledger  *model.GlobalLedger
-	loader  model.BalanceLoader
+	loader  model.UserLoader
 }
 
 // NewKafkaConsumer creates a consumer that will hydrate the given ledger.
-func NewKafkaConsumer(brokers []string, groupID string, ledger *model.GlobalLedger, loader model.BalanceLoader) *KafkaConsumer {
+func NewKafkaConsumer(brokers []string, groupID string, ledger *model.GlobalLedger, loader model.UserLoader) *KafkaConsumer {
 	return &KafkaConsumer{
 		brokers: brokers,
 		groupID: groupID,

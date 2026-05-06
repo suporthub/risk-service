@@ -43,6 +43,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -107,9 +108,12 @@ type RiskUser struct {
 	mu sync.RWMutex // per-user lock: User A's PnL update never blocks User B
 
 	UserID          string
+	Email           string
+	AccountNumber   string
 	Balance         float64 // realised wallet balance (set from orders.executed, updated on orders.closed)
 	UsedMargin      float64 // sum of margin locked across all open positions
 	TotalFloatingPnL float64 // running sum of CurrentPnL across ALL open positions
+	LastMarginCall  time.Time // timestamp of the last margin call notification sent
 
 	// Positions maps ticketID → *RiskPosition for O(1) lookup on orders.closed.
 	Positions map[string]*RiskPosition
@@ -204,14 +208,21 @@ func (l *GlobalLedger) RLock() { l.mu.RLock() }
 // RUnlock releases the shared read lock.
 func (l *GlobalLedger) RUnlock() { l.mu.RUnlock() }
 
-type BalanceLoader func(ctx context.Context, userID string) (float64, error)
+// UserDetails contains the results of a JIT user load
+type UserDetails struct {
+	Balance       float64
+	AccountNumber string
+	Email         string
+}
+
+type UserLoader func(ctx context.Context, userID string) (*UserDetails, error)
 
 // GetOrCreateUser returns the RiskUser for the given userID, creating a new
 // one with the provided initial balance and margin if not yet present.
 //
 // Used by the Kafka consumer on orders.executed.
 // Write-lock is held for the minimum duration — only for the map insertion.
-func (l *GlobalLedger) GetOrCreateUser(ctx context.Context, userID string, initialMargin float64, loader BalanceLoader) (*RiskUser, error) {
+func (l *GlobalLedger) GetOrCreateUser(ctx context.Context, userID string, initialMargin float64, loader UserLoader) (*RiskUser, error) {
 	// Fast path — read lock only.
 	l.mu.RLock()
 	user, ok := l.Users[userID]
@@ -229,17 +240,19 @@ func (l *GlobalLedger) GetOrCreateUser(ctx context.Context, userID string, initi
 		return user, nil
 	}
 
-	// JIT Load Balance
-	balance, err := loader(ctx, userID)
+	// JIT Load User Details
+	details, err := loader(ctx, userID)
 	if err != nil {
-		return nil, fmt.Errorf("jit balance load failed for %q: %w", userID, err)
+		return nil, fmt.Errorf("jit user load failed for %q: %w", userID, err)
 	}
 
 	user = &RiskUser{
-		UserID:     userID,
-		Balance:    balance,
-		UsedMargin: initialMargin,
-		Positions:  make(map[string]*RiskPosition),
+		UserID:        userID,
+		Email:         details.Email,
+		AccountNumber: details.AccountNumber,
+		Balance:       details.Balance,
+		UsedMargin:    initialMargin,
+		Positions:     make(map[string]*RiskPosition),
 	}
 	l.Users[userID] = user
 	return user, nil

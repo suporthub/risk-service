@@ -7,6 +7,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/livefxhub/risk-service/internal/model"
 )
 
 // Loader provides JIT balance hydration for the risk ledger.
@@ -42,25 +44,28 @@ func (l *Loader) Close() {
 	l.pool.Close()
 }
 
-// LoadInitialBalance fetches the user's wallet balance from Postgres.
-// If the user doesn't exist yet, it safely returns 0.0.
-func (l *Loader) LoadInitialBalance(ctx context.Context, userID string) (float64, error) {
+// LoadUserDetails fetches the initial wallet balance, account number, and email
+// via a JOIN between live_users and user_profiles.
+// Returns the model.UserDetails struct used by the JIT UserLoader.
+func (l *Loader) LoadUserDetails(ctx context.Context, userID string) (*model.UserDetails, error) {
 	qctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 
-	var balance float64
+	var details model.UserDetails
+
 	err := l.pool.QueryRow(qctx, `
-		SELECT "walletBalance" 
-		FROM live_users 
-		WHERE id = $1
-	`, userID).Scan(&balance)
+		SELECT lu."walletBalance", lu."accountNumber", up.email 
+		FROM live_users lu
+		JOIN user_profiles up ON lu."userProfileId" = up.id
+		WHERE lu.id = $1
+	`, userID).Scan(&details.Balance, &details.AccountNumber, &details.Email)
 
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			// Safe fallback if account record doesn't exist yet
-			return 0.0, nil
+			return &model.UserDetails{Balance: 0.0}, nil
 		}
-		return 0.0, err
+		return nil, err
 	}
-	return balance, nil
+	return &details, nil
 }
