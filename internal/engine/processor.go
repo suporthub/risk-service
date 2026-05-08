@@ -300,6 +300,28 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 					"equity",       equity,
 					"symbol",       tick.Symbol,
 				)
+
+				// ── Auto-cutoff notification (best-effort) ────────────────────
+				// Fire-and-forget: non-blocking push to the notification queue.
+				// We do NOT roll back PendingLiquidation on failure here — the
+				// liquidation is already in-flight regardless of whether the email
+				// sends. A missed auto_cutoff email is unfortunate; a missed
+				// liquidation is a financial risk.
+				select {
+				case p.notificationQueue <- NotificationTask{
+					Template:      "auto_cutoff",
+					UserID:        user.UserID,
+					AccountNumber: user.AccountNumber,
+					Email:         user.Email,
+					MarginLevel:   marginLevel,
+				}:
+				default:
+					slog.Error("notification channel full — auto_cutoff email dropped",
+						"user_id",   user.UserID,
+						"ticket_id", pos.TicketID,
+					)
+				}
+
 			default:
 				// Channel is full — the dispatcher is lagging badly.
 				// Roll back the flag so the NEXT tick retries the push.
@@ -329,6 +351,7 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 
 				select {
 				case p.notificationQueue <- NotificationTask{
+					Template:      "margin_call",
 					UserID:        user.UserID,
 					AccountNumber: user.AccountNumber,
 					Email:         user.Email,

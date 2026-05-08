@@ -122,15 +122,21 @@ func (c *KafkaConsumer) Start(ctx context.Context) {
 
 // consumeLoop is the generic reader loop used by both topics.
 // kafka-go's Reader handles offset commits, reconnects, and partition rebalancing.
+//
+// StartOffset = kafka.LastOffset (NOT FirstOffset):
+//   The GlobalLedger is pre-populated by the eager DB snapshot at boot.
+//   Replaying historical Kafka events would double-count positions, corrupt
+//   balances, and trigger false stop-outs. Kafka is now a LIVE-DELTA stream
+//   only — we consume events that arrive AFTER boot, not before.
 func (c *KafkaConsumer) consumeLoop(ctx context.Context, topic string, handler func([]byte) error) {
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:        c.brokers,
 		Topic:          topic,
 		GroupID:        c.groupID,
-		MinBytes:       1,       // fetch as soon as data is available
+		MinBytes:       1,        // fetch as soon as data is available
 		MaxBytes:       10 << 20, // 10 MiB max per fetch batch
-		CommitInterval: time.Second, // auto-commit every second
-		StartOffset:    kafka.FirstOffset, // replay from beginning on new group
+		CommitInterval: time.Second,
+		StartOffset:    kafka.LastOffset, // ← live delta only; DB snapshot handles history
 	})
 	defer reader.Close()
 

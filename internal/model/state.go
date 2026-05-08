@@ -302,3 +302,93 @@ func (l *GlobalLedger) RemovePosition(user *RiskUser, ticketID string) *RiskPosi
 
 	return pos
 }
+
+// ── Eager Hydration ───────────────────────────────────────────────────────────
+
+// HydrateResult summarises what was loaded, used for structured boot logging.
+type HydrateResult struct {
+	Users     int // number of distinct RiskUsers created
+	Positions int // total RiskPositions registered
+}
+
+// HydrateFromSnapshot populates the GlobalLedger from an ActiveRiskSnapshot
+// produced by db.Loader.LoadAllActiveRisk().
+//
+// This MUST be called synchronously before any goroutine (Kafka consumer,
+// tick processor) is started. It holds the GlobalLedger write-lock for the
+// full duration of the hydration pass, which is safe because nothing else
+// is reading the ledger at this point.
+//
+// Lock ordering: l.mu (GlobalLedger) is acquired first, then user.mu for
+// each RiskUser — same canonical order used everywhere else in the service.
+//
+// The Snapshot contains a db.ActiveRiskSnapshot interface via a thin
+// adapter type below so that model/ does not import db/ (avoiding a cycle).
+func (l *GlobalLedger) HydrateFromSnapshot(
+	positions []SnapshotEntry,
+	balances  map[string]float64,
+	emails    map[string]string,
+	accounts  map[string]string,
+) HydrateResult {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	result := HydrateResult{}
+
+	for _, sp := range positions {
+		// ── Get or create the RiskUser ─────────────────────────────────────────
+		user, ok := l.Users[sp.UserID]
+		if !ok {
+			user = &RiskUser{
+				UserID:        sp.UserID,
+				Balance:       balances[sp.UserID],
+				Email:         emails[sp.UserID],
+				AccountNumber: accounts[sp.UserID],
+				Positions:     make(map[string]*RiskPosition),
+			}
+			l.Users[sp.UserID] = user
+			result.Users++
+		}
+
+		// ── Build the RiskPosition and register it ─────────────────────────────
+		pos := &RiskPosition{
+			TicketID:     sp.TicketID,
+			UserID:       sp.UserID,
+			Symbol:       sp.Symbol,
+			Group:        sp.GroupName,
+			OrderType:    sp.OrderSide,
+			Volume:       sp.Volume,
+			OpenPrice:    sp.OpenPrice,
+			ContractSize: sp.ContractSize,
+			CurrentPnL:   0.0, // will be computed on first tick
+		}
+
+		// Accumulate UsedMargin from the snapshot.
+		user.UsedMargin += sp.MarginUsed
+
+		// AddPosition acquires no additional locks because we already hold l.mu.
+		// user.mu is NOT needed here — no other goroutine can be reading the
+		// user while the global write-lock is held.
+		l.AddPosition(user, pos)
+		result.Positions++
+	}
+
+	return result
+}
+
+// SnapshotEntry is the position shape expected by HydrateFromSnapshot.
+// It is defined here (in model/) rather than in db/ to avoid an import cycle:
+// model must not import db, but db imports model.
+// The db package fills this via a simple field copy.
+type SnapshotEntry struct {
+	TicketID     string
+	UserID       string
+	Symbol       string
+	GroupName    string
+	OrderSide    string
+	Volume       float64
+	OpenPrice    float64
+	ContractSize float64
+	MarginUsed   float64
+}
+

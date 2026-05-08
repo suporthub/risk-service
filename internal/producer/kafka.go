@@ -30,15 +30,27 @@ const topicNotificationSend = "notification.send"
 // Schema is validated by the notification-service's zod schema — all field
 // names and enum values MUST match exactly.
 type NotificationEvent struct {
-	EventID   string                 `json:"eventId"`           // UUID v4 — deduplication key
-	Channel   string                 `json:"channel"`           // "email" | "push" | "sms"
-	Template  string                 `json:"template"`          // must match NotificationTemplate enum
-	Priority  string                 `json:"priority"`          // "high" | "normal" | "low"
-	Recipient string                 `json:"recipient"`         // email address for "email" channel
-	Data      map[string]interface{} `json:"data"`              // template-specific payload fields
-	UserID    string                 `json:"userId,omitempty"`  // for preference checks + audit
+	EventID   string                 `json:"eventId"`            // UUID v4 — deduplication key
+	Channel   string                 `json:"channel"`            // "email" | "push" | "sms"
+	Template  string                 `json:"template"`           // must match NotificationTemplate enum
+	Priority  string                 `json:"priority"`           // "high" | "normal" | "low"
+	Recipient string                 `json:"recipient"`          // email address for "email" channel
+	Data      map[string]interface{} `json:"data"`               // template-specific payload fields
+	UserID    string                 `json:"userId,omitempty"`   // for preference checks + audit
 	UserType  string                 `json:"userType,omitempty"` // "live" | "demo" | "admin"
-	CreatedAt string                 `json:"createdAt"`         // ISO 8601 — used for staleness guard (5-min window)
+	CreatedAt string                 `json:"createdAt"`          // ISO 8601 — used for staleness guard (5-min window)
+}
+
+// RiskNotificationTask is a self-contained payload for any risk-engine notification.
+// It decouples the producer package from the engine package (no circular imports).
+// The engine package creates these and passes them to the dispatcher, which calls
+// the producer with this struct directly.
+type RiskNotificationTask struct {
+	Template      string  // "margin_call" | "auto_cutoff"
+	UserID        string
+	AccountNumber string
+	Email         string
+	MarginLevel   float64
 }
 
 // KafkaProducer writes notification events to Kafka.
@@ -67,45 +79,60 @@ func (p *KafkaProducer) Close() error {
 	return p.writer.Close()
 }
 
-// PublishMarginCall publishes a margin_call notification event for the given user.
-// It generates a fresh UUID eventId for deduplication in the notification-service.
+// buildData constructs the template-specific data map.
+// Keys map directly to the string-interpolation variables in email.templates.ts.
+func buildData(task RiskNotificationTask) map[string]interface{} {
+	switch task.Template {
+	case "auto_cutoff":
+		return map[string]interface{}{
+			"accountNumber": task.AccountNumber,
+			"marginLevel":   fmt.Sprintf("%.2f", task.MarginLevel),
+			"closedAt":      time.Now().UTC().Format(time.RFC1123),
+		}
+	default: // "margin_call"
+		return map[string]interface{}{
+			"accountNumber": task.AccountNumber,
+			"marginLevel":   fmt.Sprintf("%.2f", task.MarginLevel),
+		}
+	}
+}
+
+// PublishNotification is the single entry-point for all risk-engine notification emails.
+// It builds the correct data payload for the template and writes it to Kafka.
 //
-// Blocking call — returns an error if the write fails after kafka-go's internal retries.
-// The caller (Dispatcher) logs the error and continues; a failed notification
-// is not fatal to the risk engine.
-func (p *KafkaProducer) PublishMarginCall(ctx context.Context, userID, accountNumber, email string, marginLevel float64) error {
+// Blocking call — returns an error if the write fails.
+// The caller (NotificationDispatcher) logs and continues; a failed notification
+// email is never fatal to the risk engine.
+func (p *KafkaProducer) PublishNotification(ctx context.Context, task RiskNotificationTask) error {
 	evt := NotificationEvent{
 		EventID:   uuid.New().String(),
 		Channel:   "email",
-		Template:  "margin_call",
-		Priority:  "high",
-		Recipient: email,
-		Data: map[string]interface{}{
-			"accountNumber": accountNumber,
-			"marginLevel":   fmt.Sprintf("%.2f", marginLevel),
-		},
-		UserID:    userID,
+		Template:  task.Template,
+		Priority:  "high", // both margin_call and auto_cutoff are high-priority
+		Recipient: task.Email,
+		Data:      buildData(task),
+		UserID:    task.UserID,
 		UserType:  "live",
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
 	payload, err := json.Marshal(evt)
 	if err != nil {
-		return fmt.Errorf("marshal margin_call event: %w", err)
+		return fmt.Errorf("marshal %s event: %w", task.Template, err)
 	}
 
-	err = p.writer.WriteMessages(ctx, kafka.Message{
-		Key:   []byte(userID), // key by userID → same partition → ordered per user
+	if err := p.writer.WriteMessages(ctx, kafka.Message{
+		Key:   []byte(task.UserID), // key by userID → same partition → ordered per user
 		Value: payload,
-	})
-	if err != nil {
-		return fmt.Errorf("write margin_call to kafka: %w", err)
+	}); err != nil {
+		return fmt.Errorf("write %s to kafka: %w", task.Template, err)
 	}
 
-	slog.Info("margin_call notification published",
-		"user_id", userID,
-		"account_number", accountNumber,
-		"margin_level", fmt.Sprintf("%.2f%%", marginLevel),
+	slog.Info("risk notification published",
+		"template",       task.Template,
+		"user_id",        task.UserID,
+		"account_number", task.AccountNumber,
+		"margin_level",   fmt.Sprintf("%.2f%%", task.MarginLevel),
 	)
 	return nil
 }

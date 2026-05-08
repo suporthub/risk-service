@@ -61,8 +61,13 @@ type Config struct {
 	// The risk-service dials this address to call ForceLiquidate.
 	ExecutionGRPCAddr string
 
-	// DatabaseURL is the PostgreSQL connection string for JIT hydration.
+	// DatabaseURL is the PostgreSQL connection string for user_db (live_users, user_profiles).
+	// Used for JIT balance hydration and the boot-time wallet batch query.
 	DatabaseURL string
+
+	// OrderDatabaseURL is the PostgreSQL connection string for order_db (orders table).
+	// Used exclusively by the eager boot-time snapshot loader (LoadAllActiveRisk).
+	OrderDatabaseURL string
 }
 
 // Load reads configuration from the environment (and optionally .env file).
@@ -84,7 +89,8 @@ func Load() *Config {
 		KafkaBrokers:      parseStringSlice("KAFKA_BROKERS", ","),
 		KafkaGroupID:      envOrDefault("KAFKA_GROUP_ID", "risk-service"),
 		ExecutionGRPCAddr: requireEnv("EXECUTION_GRPC_ADDR"),
-		DatabaseURL:       requireEnv("DATABASE_URL"),
+		DatabaseURL:       requireEnv("DATABASE_URL"),       // user_db: live_users, user_profiles
+		OrderDatabaseURL:  requireEnv("ORDER_DATABASE_URL"), // order_db: orders table
 	}
 
 	slog.Info("risk-service config loaded",

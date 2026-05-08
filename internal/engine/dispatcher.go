@@ -15,6 +15,10 @@
 //   producer. The two goroutines share nothing except the channel — zero lock
 //   contention and zero tick-loop latency added.
 //
+// Supported templates:
+//   "margin_call"  — user approached the warning threshold; email warns them.
+//   "auto_cutoff"  — stop-out triggered; positions liquidated; email confirms.
+//
 // Channel sizing:
 //   Buffer of 500 tasks. In the worst case (mass margin calls during a flash
 //   crash), the processor can enqueue 500 warnings before the channel blocks.
@@ -32,10 +36,11 @@ import (
 	"github.com/livefxhub/risk-service/internal/producer"
 )
 
-// NotificationTask carries the minimal data needed for a margin call email.
+// NotificationTask carries the minimal data needed for any user-facing risk notification.
 // It is constructed inside the per-user lock in processTick() and passed
 // to the Dispatcher via a buffered channel — zero shared state after the push.
 type NotificationTask struct {
+	Template      string  // "margin_call" | "auto_cutoff" — maps to the notification-service template
 	UserID        string
 	AccountNumber string
 	Email         string
@@ -83,14 +88,21 @@ func (d *NotificationDispatcher) Start(ctx context.Context) {
 	}
 }
 
-// publish calls the Kafka producer. Any error is logged but does NOT crash the
-// dispatcher — a failed notification email must never stop the risk engine.
+// publish translates a NotificationTask into a producer.RiskNotificationTask and
+// calls the Kafka producer. Errors are logged — never fatal.
 func (d *NotificationDispatcher) publish(ctx context.Context, task NotificationTask) {
-	if err := d.producer.PublishMarginCall(ctx, task.UserID, task.AccountNumber, task.Email, task.MarginLevel); err != nil {
-		slog.Error("failed to publish margin_call notification",
-			"user_id", task.UserID,
+	if err := d.producer.PublishNotification(ctx, producer.RiskNotificationTask{
+		Template:      task.Template,
+		UserID:        task.UserID,
+		AccountNumber: task.AccountNumber,
+		Email:         task.Email,
+		MarginLevel:   task.MarginLevel,
+	}); err != nil {
+		slog.Error("failed to publish risk notification",
+			"template",       task.Template,
+			"user_id",        task.UserID,
 			"account_number", task.AccountNumber,
-			"error", err,
+			"error",          err,
 		)
 	}
 }
