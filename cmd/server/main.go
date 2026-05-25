@@ -36,7 +36,6 @@ package main
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -48,6 +47,7 @@ import (
 	"github.com/livefxhub/risk-service/internal/db"
 	"github.com/livefxhub/risk-service/internal/engine"
 	grpcDispatcher "github.com/livefxhub/risk-service/internal/grpc"
+	"github.com/livefxhub/risk-service/internal/logger"
 	"github.com/livefxhub/risk-service/internal/model"
 	"github.com/livefxhub/risk-service/internal/producer"
 	redisSubscriber "github.com/livefxhub/risk-service/internal/redis"
@@ -55,21 +55,8 @@ import (
 
 func main() {
 	// ── Structured logger ─────────────────────────────────────────────────────
-	logFile, err := os.OpenFile("/app/logs/risk-service.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
-	var logWriter io.Writer = os.Stdout
-	if err == nil {
-		logWriter = io.MultiWriter(os.Stdout, logFile)
-	}
-
-	var logHandler slog.Handler = slog.NewTextHandler(logWriter, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	})
-	if os.Getenv("ENV") == "production" {
-		logHandler = slog.NewJSONHandler(logWriter, &slog.HandlerOptions{
-			Level: slog.LevelInfo,
-		})
-	}
-	slog.SetDefault(slog.New(logHandler))
+	logger.Init()
+	slog.SetDefault(logger.AppLog)
 	slog.Info("risk-service starting", "pid", os.Getpid())
 
 	// ── Load config ───────────────────────────────────────────────────────────
@@ -88,7 +75,7 @@ func main() {
 	// stop-outs on users who already have open positions.
 	// ─────────────────────────────────────────────────────────────────────────
 	slog.Info("boot step 1/3: eager DB snapshot starting",
-		"user_db",  cfg.DatabaseURL,
+		"user_db", cfg.DatabaseURL,
 		"order_db", cfg.OrderDatabaseURL,
 	)
 
@@ -130,7 +117,7 @@ func main() {
 
 	hydrated := ledger.HydrateFromSnapshot(entries, snapshot.Balances, snapshot.Emails, snapshot.AccountNumbers)
 	slog.Info("boot step 1/3: ledger hydrated ✅",
-		"users",     hydrated.Users,
+		"users", hydrated.Users,
 		"positions", hydrated.Positions,
 	)
 
@@ -189,7 +176,7 @@ func main() {
 	dispatcher, err := grpcDispatcher.NewDispatcher(cfg.ExecutionGRPCAddr, proc.LiquidationCh)
 	if err != nil {
 		slog.Error("boot step 3/3: failed to connect to execution-service gRPC",
-			"addr",  cfg.ExecutionGRPCAddr,
+			"addr", cfg.ExecutionGRPCAddr,
 			"error", err,
 		)
 		os.Exit(1)
@@ -200,7 +187,7 @@ func main() {
 	go notifDispatcher.Start(ctx)
 
 	slog.Info("boot step 3/3: risk engine fully operational ✅",
-		"stop_out_pct",    cfg.StopOutPct,
+		"stop_out_pct", cfg.StopOutPct,
 		"margin_call_pct", cfg.MarginCallPct,
 	)
 
@@ -214,4 +201,3 @@ func main() {
 	cancel() // propagates to all goroutines
 	slog.Info("risk-service shutdown complete")
 }
-

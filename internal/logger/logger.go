@@ -16,8 +16,13 @@ var (
 func Init() {
 	isFileLogging := os.Getenv("LOG_TO_FILE") == "true"
 
-	AppLog = newJSONLogger("system_telemetry", "/app/logs/application.log", 50, 7, isFileLogging)
-	RiskLog = newJSONLogger("risk_ledger", "/app/logs/risk-events.log", 50, 14, isFileLogging)
+	// Ensure local logs directory exists gracefully
+	if isFileLogging {
+		_ = os.MkdirAll("logs", 0755)
+	}
+
+	AppLog = newJSONLogger("system_telemetry", "logs/application.log", 50, 7, isFileLogging)
+	RiskLog = newJSONLogger("risk_ledger", "logs/risk-events.log", 50, 14, isFileLogging)
 }
 
 func newJSONLogger(streamTag, filename string, maxSize, maxAge int, isFileLogging bool) *slog.Logger {
