@@ -77,7 +77,7 @@ type Processor struct {
 	ledger            *model.GlobalLedger
 	cfg               *config.Config
 	fxConverter       *FxConverter
-	LiquidationCh     chan LiquidationTask  // consumed by the gRPC liquidation dispatcher
+	LiquidationCh     chan LiquidationTask    // consumed by the gRPC liquidation dispatcher
 	notificationQueue chan<- NotificationTask // consumed by the notification dispatcher
 }
 
@@ -181,49 +181,27 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 
 	p.ledger.RUnlock() // ← GlobalLedger lock released here. Per-user locks next.
 
-	// ── Steps 3–5: Per-Position PnL Delta + Margin Level Check ───────────────
+	affectedUsers := make(map[*model.RiskUser]bool)
+
+	// ── Steps 3: Per-Position PnL Delta ───────────────
 	for _, snap := range snapshots {
-		pos  := snap.pos
+		pos := snap.pos
 		user := snap.user
 
 		// Per-user exclusive lock. User A's tick processing never blocks User B.
 		user.Lock()
 
 		// ── Step 3: Delta PnL Computation ────────────────────────────────────
-		//
-		// Resolve the group-specific bid/ask for this position.
-		//
-		// pos.Group is the spread-group assigned to the position at open time
-		// (e.g. "Standard", "VIP"). The pricing-service calculated exactly this
-		// spread and sent it in the multi-group tick string — so we are always
-		// using the same price as the execution-service HGET.
-		//
-		// Fallback order:
-		//   1. pos.Group   (correct group price — normal case)
-		//   2. "Raw"       (unspread — if the group was not in this tick)
 		gp, gpOK := tick.GroupPrices[pos.Group]
 		if !gpOK {
 			gp, gpOK = tick.GroupPrices["Raw"]
 			if !gpOK {
-				// No usable price in this tick for this position — skip to avoid
-				// stale PnL arithmetic. The next tick will contain the data.
 				user.Unlock()
 				continue
 			}
 		}
 		bid, ask := gp.Bid, gp.Ask
-		//
-		// PnL formula for USD-denominated accounts (Phase 1 assumption):
-		//
-		//   BUY:  client is long — closes by selling at BID.
-		//         PnL = (Bid - OpenPrice) × ContractSize × Volume
-		//
-		//   SELL: client is short — closes by buying at ASK.
-		//         PnL = (OpenPrice - Ask) × ContractSize × Volume
-		//
-		// ContractSize for FX majors  = 100,000 (one standard lot)
-		// ContractSize for XAUUSD     = 100     (one troy-oz lot)
-		// ContractSize is stored on the position from the Kafka event.
+
 		var newPnL float64
 		if pos.OrderType == "BUY" {
 			newPnL = (bid - pos.OpenPrice) * pos.ContractSize * pos.Volume
@@ -235,78 +213,33 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 		quote := extractQuoteCurrency(tick.Symbol)
 		newPnL_USD := p.fxConverter.ConvertToUSD(newPnL, quote)
 
-		// Delta = change in this position's PnL since the last tick.
-		// We apply ONLY the delta to the user's running total — this avoids
-		// recalculating all other positions' PnL from scratch on every tick.
 		pnlDelta := newPnL_USD - pos.CurrentPnL
-
 		user.TotalFloatingPnL += pnlDelta // O(1) running total update
 		pos.CurrentPnL = newPnL_USD       // cache for next tick's delta
 
-		// ── Step 4: Equity & Margin Level ────────────────────────────────────
-		//
-		// Equity      = Balance + TotalFloatingPnL
-		// MarginLevel = (Equity / UsedMargin) × 100
-		//
+		affectedUsers[user] = true
+		user.Unlock()
+	}
+
+	// ── Steps 4 & 5: Equity & Margin Level Check (Exactly ONCE per user) ───────────────
+	for user := range affectedUsers {
+		user.Lock()
+
+		equity := user.Equity()
+		marginLevel := user.MarginLevel()
 		// These are two float64 additions and one division — ~3ns total.
 		// MarginLevel returns 1,000,000 (effectively ∞) when UsedMargin ≤ 0.
-		equity      := user.Equity()
-		marginLevel := user.MarginLevel()
 
 		// ── Step 5: Threshold Checks ──────────────────────────────────────────
 
 		if marginLevel <= p.cfg.StopOutPct {
-			// ── STOP-OUT: "Double-Tap" debounce guard ─────────────────────────
-			//
-			// PendingLiquidation prevents N duplicate LiquidationTasks from being
-			// pushed during the race window between the first gRPC call going out
-			// (~1µs) and the Kafka orders.closed event arriving to remove the
-			// position from the ledger (~1–50ms).
-			//
-			// Without this guard, a 10-tick flash crash spike would push 10 identical
-			// ForceLiquidate RPCs — 9 of which the execution-service must reject as
-			// "position already closed/closing", wasting network bandwidth and
-			// adding unnecessary load to the execution engine's hot path.
-			//
-			// The flag is read AND set inside this user.Lock() critical section,
-			// making the check-and-set atomic with respect to other goroutines
-			// processing ticks for the same user.
-			if pos.PendingLiquidation {
-				// A LiquidationTask for this position is already in-flight.
-				// The dispatcher is on it. Skip silently — zero allocation.
-				user.Unlock()
-				continue
-			}
+			if !user.IsLiquidating {
+				user.IsLiquidating = true
 
-			// Flip the flag BEFORE pushing to the channel.
-			// This ensures that even if two goroutines somehow race here
-			// (impossible with our single-processor design, but defensive),
-			// only one task is ever enqueued per position.
-			pos.PendingLiquidation = true
+				reason := fmt.Sprintf("STOP_OUT:%.2f%% (equity=%.2f used_margin=%.2f threshold=%.1f%%)",
+					marginLevel, equity, user.UsedMargin, p.cfg.StopOutPct)
 
-			reason := fmt.Sprintf("STOP_OUT:%.2f%% (equity=%.2f used_margin=%.2f threshold=%.1f%%)",
-				marginLevel, equity, user.UsedMargin, p.cfg.StopOutPct)
-
-			select {
-			case p.LiquidationCh <- LiquidationTask{
-				TicketID: pos.TicketID,
-				UserID:   user.UserID,
-				Reason:   reason,
-			}:
-				slog.Warn("stop-out triggered — liquidation queued",
-					"ticket_id",    pos.TicketID,
-					"user_id",      user.UserID,
-					"margin_level", fmt.Sprintf("%.2f%%", marginLevel),
-					"equity",       equity,
-					"symbol",       tick.Symbol,
-				)
-
-				// ── Auto-cutoff notification (best-effort) ────────────────────
-				// Fire-and-forget: non-blocking push to the notification queue.
-				// We do NOT roll back PendingLiquidation on failure here — the
-				// liquidation is already in-flight regardless of whether the email
-				// sends. A missed auto_cutoff email is unfortunate; a missed
-				// liquidation is a financial risk.
+				// Send exactly ONE auto_cutoff email per account liquidation event
 				select {
 				case p.notificationQueue <- NotificationTask{
 					Template:      "auto_cutoff",
@@ -317,24 +250,31 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 				}:
 				default:
 					slog.Error("notification channel full — auto_cutoff email dropped",
-						"user_id",   user.UserID,
-						"ticket_id", pos.TicketID,
+						"user_id", user.UserID,
 					)
 				}
 
-			default:
-				// Channel is full — the dispatcher is lagging badly.
-				// Roll back the flag so the NEXT tick retries the push.
-				// Without rollback, the position would be permanently silenced
-				// and never liquidated until the service restarts.
-				pos.PendingLiquidation = false
-				slog.Error("liquidation channel full — stop-out delayed, flag rolled back",
-					"ticket_id",    pos.TicketID,
-					"user_id",      user.UserID,
-					"margin_level", fmt.Sprintf("%.2f%%", marginLevel),
-				)
+				// Fire liquidation payload for open positions
+				for ticketID, position := range user.Positions {
+					if !position.PendingLiquidation {
+						position.PendingLiquidation = true
+						select {
+						case p.LiquidationCh <- LiquidationTask{
+							TicketID: ticketID,
+							UserID:   user.UserID,
+							Reason:   reason,
+						}:
+							slog.Warn("stop-out triggered — liquidation queued",
+								"ticket_id", ticketID,
+								"user_id", user.UserID,
+								"margin_level", fmt.Sprintf("%.2f%%", marginLevel),
+							)
+						default:
+							position.PendingLiquidation = false
+						}
+					}
+				}
 			}
-
 		} else if marginLevel <= p.cfg.MarginCallPct {
 			// ── MARGIN CALL WARNING ───────────────────────────────────────────
 			//
@@ -358,10 +298,10 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 					MarginLevel:   marginLevel,
 				}:
 					slog.Warn("margin call warning queued",
-						"user_id",      user.UserID,
+						"user_id", user.UserID,
 						"margin_level", fmt.Sprintf("%.2f%%", marginLevel),
-						"symbol",       tick.Symbol,
-						"equity",       equity,
+						"symbol", tick.Symbol,
+						"equity", equity,
 					)
 				default:
 					// Notification channel full — dispatcher is lagging.
@@ -385,7 +325,7 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 			if !user.LastMarginCall.IsZero() {
 				user.LastMarginCall = time.Time{}
 				slog.Info("margin call throttle reset — user recovered",
-					"user_id",      user.UserID,
+					"user_id", user.UserID,
 					"margin_level", fmt.Sprintf("%.2f%%", marginLevel),
 				)
 			}
@@ -397,7 +337,9 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 
 // extractQuoteCurrency returns the 3-character quote currency from a symbol.
 // For standard 6-character FX pairs (EURUSD, GBPJPY, AUDCAD, BTCUSD):
-//   symbol[3:6] is the quote currency.
+//
+//	symbol[3:6] is the quote currency.
+//
 // For non-standard symbols, it returns "USD" as a fallback.
 func extractQuoteCurrency(symbol string) string {
 	if len(symbol) == 6 {

@@ -114,6 +114,7 @@ type RiskUser struct {
 	UsedMargin      float64 // sum of margin locked across all open positions
 	TotalFloatingPnL float64 // running sum of CurrentPnL across ALL open positions
 	LastMarginCall  time.Time // timestamp of the last margin call notification sent
+	IsLiquidating   bool // debounce flag for account-wide liquidations
 
 	// Positions maps ticketID → *RiskPosition for O(1) lookup on orders.closed.
 	Positions map[string]*RiskPosition

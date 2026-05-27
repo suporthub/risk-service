@@ -42,6 +42,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/joho/godotenv"
+
 	"github.com/livefxhub/risk-service/internal/config"
 	"github.com/livefxhub/risk-service/internal/consumer"
 	"github.com/livefxhub/risk-service/internal/db"
@@ -54,6 +56,9 @@ import (
 )
 
 func main() {
+	// ── Load .env ─────────────────────────────────────────────────────────────
+	_ = godotenv.Load()
+
 	// ── Structured logger ─────────────────────────────────────────────────────
 	logger.Init()
 	slog.SetDefault(logger.AppLog)
