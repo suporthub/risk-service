@@ -41,6 +41,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 
@@ -173,9 +174,12 @@ func main() {
 	}()
 	notifDispatcher := engine.NewNotificationDispatcher(notifProducer)
 
+	// Connect Redis Client for caching (Cooldowns)
+	redisClient := redisSubscriber.NewClusterClient(cfg.RedisNodes, cfg.RedisPassword, 10, 5000*time.Millisecond)
+
 	// Tick processor: evaluates PnL delta + margin level on every tick.
 	fxConverter := engine.NewFxConverter()
-	proc := engine.NewProcessor(ledger, cfg, fxConverter, notifDispatcher.Queue())
+	proc := engine.NewProcessor(ledger, cfg, fxConverter, notifDispatcher.Queue(), redisClient)
 
 	// gRPC Dispatcher: fires ForceLiquidate RPCs when stop-out is triggered.
 	dispatcher, err := grpcDispatcher.NewDispatcher(cfg.ExecutionGRPCAddr, proc.LiquidationCh)
