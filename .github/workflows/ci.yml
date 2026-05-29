@@ -19,9 +19,9 @@ jobs:
             set -e
             cd /v3/risk-service
             
-            # Force server to match GitHub exactly
-            git fetch origin
-            git reset --hard origin/${{ github.ref_name }}
+            # Force server to match GitHub exactly (using automatic token to support private repos securely)
+            git fetch https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git ${{ github.ref_name }}
+            git reset --hard FETCH_HEAD
             
             # Get short SHA for precise tagging
             export SHA=$(git rev-parse --short HEAD)
