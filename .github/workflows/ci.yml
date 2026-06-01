@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main, master, develop]
+    branches: [v3_prod]
 
 jobs:
   deploy-to-k3s:
@@ -12,9 +12,9 @@ jobs:
       - name: Deploy securely over SSH (Direct Build)
         uses: appleboy/ssh-action@master
         with:
-          host: ${{ secrets.SERVER_IP }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
+          host: ${{ secrets.PROD_SERVER_IP }}
+          username: ${{ secrets.PROD_SERVER_USER }}
+          key: ${{ secrets.PROD_SERVER_SSH_KEY }}
           script: |
             set -e
             cd /v3/risk-service
