@@ -68,6 +68,9 @@ type Config struct {
 	// OrderDatabaseURL is the PostgreSQL connection string for order_db (orders table).
 	// Used exclusively by the eager boot-time snapshot loader (LoadAllActiveRisk).
 	OrderDatabaseURL string
+
+	// MetricsAddr is the address where the metrics server listens.
+	MetricsAddr string
 }
 
 // Load reads configuration from the environment (and optionally .env file).
@@ -91,6 +94,7 @@ func Load() *Config {
 		ExecutionGRPCAddr: requireEnv("EXECUTION_GRPC_ADDR"),
 		DatabaseURL:       requireEnv("DATABASE_URL"),       // user_db: live_users, user_profiles
 		OrderDatabaseURL:  requireEnv("ORDER_DATABASE_URL"), // order_db: orders table
+		MetricsAddr:       envOrDefault("METRICS_ADDR", ":9090"),
 	}
 
 	slog.Info("risk-service config loaded",

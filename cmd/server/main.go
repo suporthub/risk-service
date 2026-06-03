@@ -37,6 +37,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -44,6 +45,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/livefxhub/risk-service/internal/config"
 	"github.com/livefxhub/risk-service/internal/consumer"
@@ -200,6 +202,24 @@ func main() {
 		"margin_call_pct", cfg.MarginCallPct,
 	)
 
+	// ── Metrics HTTP server ──────────────────────────────────────────────────
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+
+	metricsSrv := &http.Server{
+		Addr:         cfg.MetricsAddr,
+		Handler:      metricsMux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+	}
+
+	go func() {
+		slog.Info("metrics server listening", "addr", cfg.MetricsAddr)
+		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("metrics server error", "error", err)
+		}
+	}()
+
 	// ── Wait for OS shutdown signal ───────────────────────────────────────────
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -208,5 +228,13 @@ func main() {
 	slog.Info("shutdown signal received", "signal", sig.String())
 
 	cancel() // propagates to all goroutines
+
+	// Graceful metrics server shutdown
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer shutCancel()
+	if err := metricsSrv.Shutdown(shutCtx); err != nil {
+		slog.Warn("metrics server shutdown error", "error", err)
+	}
+
 	slog.Info("risk-service shutdown complete")
 }
