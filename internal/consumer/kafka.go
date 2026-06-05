@@ -56,11 +56,11 @@ type OrderExecutedEvent struct {
 	UserID            string    `json:"user_id"`
 	GroupName         string    `json:"group_name"`
 	Symbol            string    `json:"symbol"`
-	OrderSide         string    `json:"order_side"`   // "BUY" or "SELL"
-	Volume            float64   `json:"volume"`
-	ExecutionPrice    float64   `json:"execution_price"`
-	MarginUsed        float64   `json:"margin_used"`        // margin delta locked (USD)
-	CommissionCharged float64   `json:"commission_charged"` // already deducted from Balance
+	OrderSide         string    `json:"order_side"` // "BUY" or "SELL"
+	Volume            float64   `json:"volume,string"`
+	ExecutionPrice    float64   `json:"execution_price,string"`
+	MarginUsed        float64   `json:"margin_used,string"`        // margin delta locked (USD)
+	CommissionCharged float64   `json:"commission_charged,string"` // already deducted from Balance
 	ClientIP          string    `json:"client_ip"`
 	ExecutedAt        time.Time `json:"executed_at"`
 }
@@ -71,8 +71,8 @@ type OrderClosedEvent struct {
 	TicketID     string    `json:"ticket_id"`
 	UserID       string    `json:"user_id"`
 	Symbol       string    `json:"symbol"`
-	RealizedPnL  float64   `json:"realized_pnl"`  // final profit/loss in USD
-	MarginReturn float64   `json:"margin_return"`  // margin being freed (USD)
+	RealizedPnL  float64   `json:"realized_pnl,string"`  // final profit/loss in USD
+	MarginReturn float64   `json:"margin_return,string"` // margin being freed (USD)
 	ClosedAt     time.Time `json:"closed_at"`
 }
 
@@ -124,10 +124,11 @@ func (c *KafkaConsumer) Start(ctx context.Context) {
 // kafka-go's Reader handles offset commits, reconnects, and partition rebalancing.
 //
 // StartOffset = kafka.LastOffset (NOT FirstOffset):
-//   The GlobalLedger is pre-populated by the eager DB snapshot at boot.
-//   Replaying historical Kafka events would double-count positions, corrupt
-//   balances, and trigger false stop-outs. Kafka is now a LIVE-DELTA stream
-//   only — we consume events that arrive AFTER boot, not before.
+//
+//	The GlobalLedger is pre-populated by the eager DB snapshot at boot.
+//	Replaying historical Kafka events would double-count positions, corrupt
+//	balances, and trigger false stop-outs. Kafka is now a LIVE-DELTA stream
+//	only — we consume events that arrive AFTER boot, not before.
 func (c *KafkaConsumer) consumeLoop(ctx context.Context, topic string, handler func([]byte) error) {
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:        c.brokers,
@@ -179,11 +180,11 @@ func (c *KafkaConsumer) consumeLoop(ctx context.Context, topic string, handler f
 // ─────────────────────────────────────────────────────────────────────────────
 
 // handleOrderExecuted processes a new position event and updates the RAM ledger:
-//   1. Get or create the RiskUser (first-ever order for this user).
-//   2. Deduct the commission from Balance (already charged by execution-service).
-//   3. Add margin to UsedMargin.
-//   4. Create a RiskPosition and register it in both Users[id].Positions
-//      and the global SymbolIndex.
+//  1. Get or create the RiskUser (first-ever order for this user).
+//  2. Deduct the commission from Balance (already charged by execution-service).
+//  3. Add margin to UsedMargin.
+//  4. Create a RiskPosition and register it in both Users[id].Positions
+//     and the global SymbolIndex.
 func (c *KafkaConsumer) handleOrderExecuted(data []byte) error {
 	var evt OrderExecutedEvent
 	if err := json.Unmarshal(data, &evt); err != nil {
@@ -206,20 +207,20 @@ func (c *KafkaConsumer) handleOrderExecuted(data []byte) error {
 	// Build the RiskPosition from the event.
 	pos := &model.RiskPosition{
 		TicketID:     evt.TicketID,
-		UserID:       evt.UserID,       // back-reference: lets tick processor do O(1) user lookup from SymbolIndex
+		UserID:       evt.UserID, // back-reference: lets tick processor do O(1) user lookup from SymbolIndex
 		Symbol:       evt.Symbol,
-		Group:        evt.GroupName,    // spread-group: selects correct bid/ask from multi-group tick payload
+		Group:        evt.GroupName, // spread-group: selects correct bid/ask from multi-group tick payload
 		OrderType:    evt.OrderSide,
 		Volume:       evt.Volume,
 		OpenPrice:    evt.ExecutionPrice,
 		ContractSize: ContractSizeDefault, // Phase 2: read from instrument config
-		CurrentPnL:   0.0,                // starts at zero; updated on first tick
+		CurrentPnL:   0.0,                 // starts at zero; updated on first tick
 	}
 
 	// Acquire both locks in a consistent order to prevent deadlock:
 	// always GlobalLedger.mu THEN user.mu — never in reverse.
-	c.ledger.Lock()  // GlobalLedger write-lock (to mutate SymbolIndex)
-	user.Lock()       // per-user write-lock (to mutate Balance, UsedMargin, Positions)
+	c.ledger.Lock() // GlobalLedger write-lock (to mutate SymbolIndex)
+	user.Lock()     // per-user write-lock (to mutate Balance, UsedMargin, Positions)
 
 	// Deduct the commission that the execution-service already charged.
 	// We reflect this in the risk ledger so Equity stays accurate.
@@ -235,11 +236,11 @@ func (c *KafkaConsumer) handleOrderExecuted(data []byte) error {
 	c.ledger.Unlock()
 
 	slog.Info("position opened in risk ledger",
-		"ticket_id",   evt.TicketID,
-		"user_id",     evt.UserID,
-		"symbol",      evt.Symbol,
-		"side",        evt.OrderSide,
-		"volume",      evt.Volume,
+		"ticket_id", evt.TicketID,
+		"user_id", evt.UserID,
+		"symbol", evt.Symbol,
+		"side", evt.OrderSide,
+		"volume", evt.Volume,
 		"margin_used", evt.MarginUsed,
 	)
 
@@ -251,12 +252,12 @@ func (c *KafkaConsumer) handleOrderExecuted(data []byte) error {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // handleOrderClosed processes a position closure event:
-//   1. Find the user by UserID.
-//   2. Remove the position from Users[id].Positions AND SymbolIndex.
-//   3. Free UsedMargin.
-//   4. Apply realized PnL to Balance.
-//   5. Subtract the position's last CurrentPnL from TotalFloatingPnL
-//      (since the floating PnL is now realised and reflected in Balance).
+//  1. Find the user by UserID.
+//  2. Remove the position from Users[id].Positions AND SymbolIndex.
+//  3. Free UsedMargin.
+//  4. Apply realized PnL to Balance.
+//  5. Subtract the position's last CurrentPnL from TotalFloatingPnL
+//     (since the floating PnL is now realised and reflected in Balance).
 func (c *KafkaConsumer) handleOrderClosed(data []byte) error {
 	var evt OrderClosedEvent
 	if err := json.Unmarshal(data, &evt); err != nil {
@@ -279,7 +280,7 @@ func (c *KafkaConsumer) handleOrderClosed(data []byte) error {
 		// In this case, there is no RAM state to clean up — log and skip.
 		slog.Warn("orders.closed for unknown user (replay gap?)",
 			"ticket_id", evt.TicketID,
-			"user_id",   evt.UserID,
+			"user_id", evt.UserID,
 		)
 		return nil
 	}
@@ -308,8 +309,8 @@ func (c *KafkaConsumer) handleOrderClosed(data []byte) error {
 	c.ledger.Unlock()
 
 	slog.Info("position closed in risk ledger",
-		"ticket_id",    evt.TicketID,
-		"user_id",      evt.UserID,
+		"ticket_id", evt.TicketID,
+		"user_id", evt.UserID,
 		"realized_pnl", evt.RealizedPnL,
 		"margin_freed", evt.MarginReturn,
 	)
@@ -355,4 +356,3 @@ func (c *KafkaConsumer) handleWalletTransaction(data []byte) error {
 
 	return nil
 }
-
