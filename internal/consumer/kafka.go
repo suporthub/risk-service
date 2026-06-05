@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	kafka "github.com/segmentio/kafka-go"
@@ -74,6 +75,7 @@ type OrderClosedEvent struct {
 	Symbol       string    `json:"symbol"`
 	RealizedPnL  float64   `json:"realized_pnl,string"`  // final profit/loss in USD
 	MarginReturn float64   `json:"margin_return,string"` // margin being freed (USD)
+	Balance      string    `json:"balance"`              // definitive post-trade balance from execution-engine (stringified decimal)
 	ClosedAt     time.Time `json:"closed_at"`
 }
 
@@ -309,13 +311,50 @@ func (c *KafkaConsumer) handleOrderClosed(data []byte) error {
 		// Credit the realized PnL to the wallet balance.
 		user.Balance += evt.RealizedPnL
 
-		// If all positions are now closed, reset the liquidation debounce flag
-		// so the user can be liquidated again if they open new positions.
-		if len(user.Positions) == 0 && user.IsLiquidating {
-			user.IsLiquidating = false
-			slog.Info("liquidation flag reset — all positions closed",
-				"user_id", evt.UserID,
-			)
+		// ── Self-Healing Zeroing + Kafka-driven Balance Sync ─────────────
+		// When the portfolio is empty, clamp running totals to absolute zero.
+		// Even with perfect race guards, floating-point arithmetic can leave
+		// micro-fractions (e.g. 0.000000001) behind. Zeroing ensures the
+		// state machine stays pristine.
+		//
+		// Balance Sync: instead of querying PostgreSQL (which risks loading
+		// a stale pre-close balance due to replication lag between the
+		// persistence-worker and this consumer), we trust the definitive
+		// post-trade balance embedded in the OrderClosedEvent by the
+		// execution-engine — the single source of truth.
+		if len(user.Positions) == 0 {
+			user.UsedMargin = 0
+			user.TotalFloatingPnL = 0
+
+			// Sync balance from execution-engine's authoritative value.
+			if evt.Balance != "" {
+				if parsedBalance, err := strconv.ParseFloat(evt.Balance, 64); err == nil {
+					oldBalance := user.Balance
+					user.Balance = parsedBalance
+					if oldBalance != parsedBalance {
+						slog.Warn("balance drift corrected on portfolio empty",
+							"user_id", evt.UserID,
+							"old_balance", oldBalance,
+							"new_balance", parsedBalance,
+						)
+					}
+				} else {
+					slog.Error("failed to parse balance from OrderClosedEvent",
+						"user_id", evt.UserID,
+						"raw_balance", evt.Balance,
+						"error", err,
+					)
+				}
+			}
+
+			// Reset the liquidation debounce flag so the user can be
+			// liquidated again if they open new positions.
+			if user.IsLiquidating {
+				user.IsLiquidating = false
+				slog.Info("liquidation flag reset — all positions closed",
+					"user_id", evt.UserID,
+				)
+			}
 		}
 	}
 

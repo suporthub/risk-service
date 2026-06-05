@@ -194,6 +194,16 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 		// Per-user exclusive lock. User A's tick processing never blocks User B.
 		user.Lock()
 
+		// ── Race Guard (Double-Checked Locking) ──────────────────────────────
+		// Between GlobalLedger.RUnlock() (line ~185) and this user.Lock(),
+		// the Kafka consumer may have closed and removed this position.
+		// Re-validate that the position is still in the user's map.
+		// If it was removed, skip — the stale tick is safely discarded.
+		if _, stillOpen := user.Positions[pos.TicketID]; !stillOpen {
+			user.Unlock()
+			continue
+		}
+
 		// ── Step 3: Delta PnL Computation ────────────────────────────────────
 		gp, gpOK := tick.GroupPrices[pos.Group]
 		if !gpOK {
