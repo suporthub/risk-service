@@ -58,6 +58,7 @@ type OrderExecutedEvent struct {
 	Symbol            string    `json:"symbol"`
 	OrderSide         string    `json:"order_side"` // "BUY" or "SELL"
 	Volume            float64   `json:"volume,string"`
+	ContractSize      float64   `json:"contract_size,string"`
 	ExecutionPrice    float64   `json:"execution_price,string"`
 	MarginUsed        float64   `json:"margin_used,string"`        // margin delta locked (USD)
 	CommissionCharged float64   `json:"commission_charged,string"` // already deducted from Balance
@@ -213,8 +214,12 @@ func (c *KafkaConsumer) handleOrderExecuted(data []byte) error {
 		OrderType:    evt.OrderSide,
 		Volume:       evt.Volume,
 		OpenPrice:    evt.ExecutionPrice,
-		ContractSize: ContractSizeDefault, // Phase 2: read from instrument config
-		CurrentPnL:   0.0,                 // starts at zero; updated on first tick
+		ContractSize: evt.ContractSize,
+		CurrentPnL:   0.0, // starts at zero; updated on first tick
+	}
+
+	if pos.ContractSize == 0 {
+		pos.ContractSize = ContractSizeDefault // Fallback for older events in queue
 	}
 
 	// Acquire both locks in a consistent order to prevent deadlock:
