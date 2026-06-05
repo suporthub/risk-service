@@ -308,6 +308,15 @@ func (c *KafkaConsumer) handleOrderClosed(data []byte) error {
 
 		// Credit the realized PnL to the wallet balance.
 		user.Balance += evt.RealizedPnL
+
+		// If all positions are now closed, reset the liquidation debounce flag
+		// so the user can be liquidated again if they open new positions.
+		if len(user.Positions) == 0 && user.IsLiquidating {
+			user.IsLiquidating = false
+			slog.Info("liquidation flag reset — all positions closed",
+				"user_id", evt.UserID,
+			)
+		}
 	}
 
 	user.Unlock()

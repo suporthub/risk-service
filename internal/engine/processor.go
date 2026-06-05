@@ -250,6 +250,13 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 			p.SendMarginWarning(ctx, user, marginLevel)
 		} else if marginLevel >= (p.cfg.MarginCallPct + 10.0) {
 			// ── RECOVERY RESET ────────────────────────────────────────────────
+			if user.IsLiquidating {
+				user.IsLiquidating = false
+				slog.Info("liquidation flag reset — user margin recovered",
+					"user_id", user.UserID,
+					"margin_level", fmt.Sprintf("%.2f%%", marginLevel),
+				)
+			}
 			if !user.LastMarginCall.IsZero() {
 				user.LastMarginCall = time.Time{}
 				slog.Info("in-memory margin call throttle reset — user recovered",
