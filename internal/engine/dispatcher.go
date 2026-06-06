@@ -31,7 +31,9 @@ package engine
 
 import (
 	"context"
-	"log/slog"
+
+	"github.com/livefxhub/risk-service/internal/logger"
+	"go.uber.org/zap"
 
 	"github.com/livefxhub/risk-service/internal/producer"
 )
@@ -40,7 +42,7 @@ import (
 // It is constructed inside the per-user lock in processTick() and passed
 // to the Dispatcher via a buffered channel — zero shared state after the push.
 type NotificationTask struct {
-	Template      string  // "margin_call" | "auto_cutoff" — maps to the notification-service template
+	Template      string // "margin_call" | "auto_cutoff" — maps to the notification-service template
 	UserID        string
 	AccountNumber string
 	Email         string
@@ -73,11 +75,11 @@ func (d *NotificationDispatcher) Queue() chan<- NotificationTask {
 //
 //	go dispatcher.Start(ctx)
 func (d *NotificationDispatcher) Start(ctx context.Context) {
-	slog.Info("notification dispatcher started")
+	logger.Telemetry.Info("notification dispatcher started")
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("notification dispatcher shutting down")
+			logger.Telemetry.Info("notification dispatcher shutting down")
 			return
 		case task, ok := <-d.queue:
 			if !ok {
@@ -98,11 +100,11 @@ func (d *NotificationDispatcher) publish(ctx context.Context, task NotificationT
 		Email:         task.Email,
 		MarginLevel:   task.MarginLevel,
 	}); err != nil {
-		slog.Error("failed to publish risk notification",
-			"template",       task.Template,
-			"user_id",        task.UserID,
-			"account_number", task.AccountNumber,
-			"error",          err,
+		logger.Error.Error("failed to publish risk notification",
+			zap.String("template", task.Template),
+			zap.String("user_id", task.UserID),
+			zap.String("account_number", task.AccountNumber),
+			zap.Error(err),
 		)
 	}
 }

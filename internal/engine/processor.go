@@ -47,8 +47,10 @@ package engine
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
+
+	"github.com/livefxhub/risk-service/internal/logger"
+	"go.uber.org/zap"
 
 	"github.com/livefxhub/risk-service/internal/config"
 	"github.com/livefxhub/risk-service/internal/model"
@@ -105,11 +107,11 @@ func NewProcessor(ledger *model.GlobalLedger, cfg *config.Config, fxConverter *F
 //
 //	go proc.Start(ctx, sub.TickCh)
 func (p *Processor) Start(ctx context.Context, tickCh <-chan redisSub.Tick) {
-	slog.Info("tick processor started")
+	logger.Telemetry.Info("tick processor started")
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("tick processor shutting down")
+			logger.Telemetry.Info("tick processor shutting down")
 			return
 		case tick, ok := <-tickCh:
 			if !ok {
@@ -262,16 +264,16 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 			// ── RECOVERY RESET ────────────────────────────────────────────────
 			if user.IsLiquidating {
 				user.IsLiquidating = false
-				slog.Info("liquidation flag reset — user margin recovered",
-					"user_id", user.UserID,
-					"margin_level", fmt.Sprintf("%.2f%%", marginLevel),
+				logger.Audit.Info("liquidation flag reset — user margin recovered",
+					zap.String("user_id", user.UserID),
+					zap.String("margin_level", fmt.Sprintf("%.2f%%", marginLevel)),
 				)
 			}
 			if !user.LastMarginCall.IsZero() {
 				user.LastMarginCall = time.Time{}
-				slog.Info("in-memory margin call throttle reset — user recovered",
-					"user_id", user.UserID,
-					"margin_level", fmt.Sprintf("%.2f%%", marginLevel),
+				logger.Audit.Info("in-memory margin call throttle reset — user recovered",
+					zap.String("user_id", user.UserID),
+					zap.String("margin_level", fmt.Sprintf("%.2f%%", marginLevel)),
 				)
 			}
 		}

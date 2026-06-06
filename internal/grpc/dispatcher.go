@@ -35,14 +35,16 @@ package grpc
 
 import (
 	"context"
-	"log/slog"
 	"time"
+
+	"github.com/livefxhub/risk-service/internal/logger"
+	"go.uber.org/zap"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/livefxhub/risk-service/internal/engine"
 	executionpb "github.com/livefxhub/risk-service/gen/executionpb"
+	"github.com/livefxhub/risk-service/internal/engine"
 )
 
 // Dispatcher holds the gRPC client connection and the LiquidationTask channel.
@@ -74,7 +76,7 @@ func NewDispatcher(addr string, taskCh <-chan engine.LiquidationTask) (*Dispatch
 		return nil, err
 	}
 
-	slog.Info("gRPC dispatcher connected to execution-service", "addr", addr)
+	logger.Telemetry.Info("gRPC dispatcher connected to execution-service", zap.String("addr", addr))
 
 	return &Dispatcher{
 		client: executionpb.NewExecutionServiceClient(conn),
@@ -92,19 +94,20 @@ func NewDispatcher(addr string, taskCh <-chan engine.LiquidationTask) (*Dispatch
 //     (e.g. 4 goroutines each reading from the same channel).
 //
 // Call this from main():
-//   go dispatcher.Start(ctx)
+//
+//	go dispatcher.Start(ctx)
 func (d *Dispatcher) Start(ctx context.Context) {
-	slog.Info("liquidation dispatcher started")
+	logger.Telemetry.Info("liquidation dispatcher started")
 
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("liquidation dispatcher shutting down")
+			logger.Telemetry.Info("liquidation dispatcher shutting down")
 			return
 
 		case task, ok := <-d.taskCh:
 			if !ok {
-				slog.Info("liquidation channel closed — dispatcher exiting")
+				logger.Telemetry.Info("liquidation channel closed — dispatcher exiting")
 				return
 			}
 			d.dispatch(task)
@@ -132,20 +135,20 @@ func (d *Dispatcher) dispatch(task engine.LiquidationTask) {
 		Reason:   task.Reason,
 	}
 
-	slog.Info("dispatching force-liquidate",
-		"ticket_id", task.TicketID,
-		"user_id",   task.UserID,
-		"reason",    task.Reason,
+	logger.Audit.Info("dispatching force-liquidate",
+		zap.String("ticket_id", task.TicketID),
+		zap.String("user_id", task.UserID),
+		zap.String("reason", task.Reason),
 	)
 
 	resp, err := d.client.ForceLiquidate(ctx, req)
 	if err != nil {
 		// Network or timeout error. The position remains open.
 		// The next tick will re-trigger the stop-out check.
-		slog.Error("ForceLiquidate gRPC call failed",
-			"ticket_id", task.TicketID,
-			"user_id",   task.UserID,
-			"error",     err,
+		logger.Error.Error("ForceLiquidate gRPC call failed",
+			zap.String("ticket_id", task.TicketID),
+			zap.String("user_id", task.UserID),
+			zap.Error(err),
 		)
 		return
 	}
@@ -153,17 +156,17 @@ func (d *Dispatcher) dispatch(task engine.LiquidationTask) {
 	if !resp.Success {
 		// Execution-service declined (e.g. position already closed by the user
 		// between the stop-out trigger and our RPC arriving). Log and move on.
-		slog.Warn("ForceLiquidate returned success=false",
-			"ticket_id", task.TicketID,
-			"user_id",   task.UserID,
-			"message",   resp.Message,
+		logger.Error.Warn("ForceLiquidate returned success=false",
+			zap.String("ticket_id", task.TicketID),
+			zap.String("user_id", task.UserID),
+			zap.String("message", resp.Message),
 		)
 		return
 	}
 
-	slog.Info("position force-liquidated successfully",
-		"ticket_id", task.TicketID,
-		"user_id",   task.UserID,
-		"message",   resp.Message,
+	logger.Audit.Info("position force-liquidated successfully",
+		zap.String("ticket_id", task.TicketID),
+		zap.String("user_id", task.UserID),
+		zap.String("message", resp.Message),
 	)
 }

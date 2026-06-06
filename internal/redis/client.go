@@ -11,8 +11,10 @@
 package redis
 
 import (
-	"log/slog"
 	"time"
+
+	"github.com/livefxhub/risk-service/internal/logger"
+	"go.uber.org/zap"
 
 	goredis "github.com/redis/go-redis/v9"
 )
@@ -22,7 +24,7 @@ import (
 // The driver discovers the full cluster topology via CLUSTER SLOTS/SHARDS
 // after connecting to any seed node.
 func NewClusterClient(addrs []string, password string, poolSize int, readTimeout time.Duration) *goredis.ClusterClient {
-	slog.Info("building Redis cluster client", "seed_nodes", addrs)
+	logger.Telemetry.Info("building Redis cluster client", zap.Strings("seed_nodes", addrs))
 
 	opts := &goredis.ClusterOptions{
 		Addrs:        addrs,

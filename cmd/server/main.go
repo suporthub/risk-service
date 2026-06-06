@@ -36,13 +36,14 @@ package main
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -64,8 +65,8 @@ func main() {
 
 	// ── Structured logger ─────────────────────────────────────────────────────
 	logger.Init()
-	slog.SetDefault(logger.AppLog)
-	slog.Info("risk-service starting", "pid", os.Getpid())
+	defer logger.Sync()
+	logger.Telemetry.Info("risk-service starting", zap.Int("pid", os.Getpid()))
 
 	// ── Load config ───────────────────────────────────────────────────────────
 	cfg := config.Load()
@@ -82,14 +83,14 @@ func main() {
 	// it can evaluate margin levels against an empty ledger and fire false
 	// stop-outs on users who already have open positions.
 	// ─────────────────────────────────────────────────────────────────────────
-	slog.Info("boot step 1/3: eager DB snapshot starting",
-		"user_db", cfg.DatabaseURL,
-		"order_db", cfg.OrderDatabaseURL,
+	logger.Telemetry.Info("boot step 1/3: eager DB snapshot starting",
+		zap.String("user_db", cfg.DatabaseURL),
+		zap.String("order_db", cfg.OrderDatabaseURL),
 	)
 
 	dbLoader, err := db.NewLoader(ctx, cfg.DatabaseURL, cfg.OrderDatabaseURL)
 	if err != nil {
-		slog.Error("boot step 1/3: failed to connect to databases", "error", err)
+		logger.Error.Error("boot step 1/3: failed to connect to databases", zap.Error(err))
 		os.Exit(1)
 	}
 	defer dbLoader.Close()
@@ -98,7 +99,7 @@ func main() {
 	// Fatal on failure — a partially-hydrated ledger is worse than no service.
 	snapshot, err := dbLoader.LoadAllActiveRisk(ctx)
 	if err != nil {
-		slog.Error("boot step 1/3: eager snapshot failed", "error", err)
+		logger.Error.Error("boot step 1/3: eager snapshot failed", zap.Error(err))
 		os.Exit(1)
 	}
 
@@ -124,9 +125,9 @@ func main() {
 	}
 
 	hydrated := ledger.HydrateFromSnapshot(entries, snapshot.Balances, snapshot.Emails, snapshot.AccountNumbers)
-	slog.Info("boot step 1/3: ledger hydrated ✅",
-		"users", hydrated.Users,
-		"positions", hydrated.Positions,
+	logger.Telemetry.Info("boot step 1/3: ledger hydrated ✅",
+		zap.Int("users", hydrated.Users),
+		zap.Int("positions", hydrated.Positions),
 	)
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -139,9 +140,9 @@ func main() {
 	// The consumer still performs JIT loads for brand-new users (users with
 	// no positions open AT boot time who place their first order post-boot).
 	// ─────────────────────────────────────────────────────────────────────────
-	slog.Info("boot step 2/3: starting Kafka live-delta consumer",
-		"topics", strings.Join([]string{"orders.executed", "orders.closed", "wallet.transactions"}, ", "),
-		"offset", "latest",
+	logger.Telemetry.Info("boot step 2/3: starting Kafka live-delta consumer",
+		zap.String("topics", strings.Join([]string{"orders.executed", "orders.closed", "wallet.transactions"}, ", ")),
+		zap.String("offset", "latest"),
 	)
 
 	kafkaConsumer := consumer.NewKafkaConsumer(
@@ -151,7 +152,7 @@ func main() {
 		dbLoader.LoadUserDetails, // JIT loader for new post-boot users only
 	)
 	kafkaConsumer.Start(ctx)
-	slog.Info("boot step 2/3: Kafka live-delta consumer started ✅")
+	logger.Telemetry.Info("boot step 2/3: Kafka live-delta consumer started ✅")
 
 	// ─────────────────────────────────────────────────────────────────────────
 	// STEP 3: Redis Tick Stream + Risk Engine.
@@ -161,7 +162,7 @@ func main() {
 	// in the narrow window between the DB snapshot and the Kafka consumer
 	// reaching LastOffset are already applied before the first tick fires.
 	// ─────────────────────────────────────────────────────────────────────────
-	slog.Info("boot step 3/3: starting Redis tick stream and risk engine")
+	logger.Telemetry.Info("boot step 3/3: starting Redis tick stream and risk engine")
 
 	sub := redisSubscriber.NewSubscriber(cfg.RedisNodes, cfg.RedisPassword)
 	defer sub.Close()
@@ -171,7 +172,7 @@ func main() {
 	notifProducer := producer.NewKafkaProducer(cfg.KafkaBrokers)
 	defer func() {
 		if err := notifProducer.Close(); err != nil {
-			slog.Warn("notification producer close error", "error", err)
+			logger.Error.Warn("notification producer close error", zap.Error(err))
 		}
 	}()
 	notifDispatcher := engine.NewNotificationDispatcher(notifProducer)
@@ -186,9 +187,9 @@ func main() {
 	// gRPC Dispatcher: fires ForceLiquidate RPCs when stop-out is triggered.
 	dispatcher, err := grpcDispatcher.NewDispatcher(cfg.ExecutionGRPCAddr, proc.LiquidationCh)
 	if err != nil {
-		slog.Error("boot step 3/3: failed to connect to execution-service gRPC",
-			"addr", cfg.ExecutionGRPCAddr,
-			"error", err,
+		logger.Error.Error("boot step 3/3: failed to connect to execution-service gRPC",
+			zap.String("addr", cfg.ExecutionGRPCAddr),
+			zap.Error(err),
 		)
 		os.Exit(1)
 	}
@@ -197,9 +198,9 @@ func main() {
 	go dispatcher.Start(ctx)
 	go notifDispatcher.Start(ctx)
 
-	slog.Info("boot step 3/3: risk engine fully operational ✅",
-		"stop_out_pct", cfg.StopOutPct,
-		"margin_call_pct", cfg.MarginCallPct,
+	logger.Telemetry.Info("boot step 3/3: risk engine fully operational ✅",
+		zap.Float64("stop_out_pct", cfg.StopOutPct),
+		zap.Float64("margin_call_pct", cfg.MarginCallPct),
 	)
 
 	// ── Metrics HTTP server ──────────────────────────────────────────────────
@@ -214,9 +215,9 @@ func main() {
 	}
 
 	go func() {
-		slog.Info("metrics server listening", "addr", cfg.MetricsAddr)
+		logger.Telemetry.Info("metrics server listening", zap.String("addr", cfg.MetricsAddr))
 		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("metrics server error", "error", err)
+			logger.Error.Error("metrics server error", zap.Error(err))
 		}
 	}()
 
@@ -225,7 +226,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	sig := <-sigCh
-	slog.Info("shutdown signal received", "signal", sig.String())
+	logger.Telemetry.Info("shutdown signal received", zap.String("signal", sig.String()))
 
 	cancel() // propagates to all goroutines
 
@@ -233,8 +234,8 @@ func main() {
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutCancel()
 	if err := metricsSrv.Shutdown(shutCtx); err != nil {
-		slog.Warn("metrics server shutdown error", "error", err)
+		logger.Error.Warn("metrics server shutdown error", zap.Error(err))
 	}
 
-	slog.Info("risk-service shutdown complete")
+	logger.Telemetry.Info("risk-service shutdown complete")
 }

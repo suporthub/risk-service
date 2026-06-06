@@ -46,9 +46,9 @@ type ForceLiquidateRequest struct {
 	Reason   string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
 }
 
-func (x *ForceLiquidateRequest) Reset()        {}
+func (x *ForceLiquidateRequest) Reset()         {}
 func (x *ForceLiquidateRequest) String() string { return x.TicketId }
-func (x *ForceLiquidateRequest) ProtoMessage() {}
+func (x *ForceLiquidateRequest) ProtoMessage()  {}
 
 // ForceLiquidateResponse is the result of the forced liquidation attempt.
 type ForceLiquidateResponse struct {
@@ -57,9 +57,9 @@ type ForceLiquidateResponse struct {
 	Message string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
 }
 
-func (x *ForceLiquidateResponse) Reset()        {}
+func (x *ForceLiquidateResponse) Reset()         {}
 func (x *ForceLiquidateResponse) String() string { return x.Message }
-func (x *ForceLiquidateResponse) ProtoMessage() {}
+func (x *ForceLiquidateResponse) ProtoMessage()  {}
 
 // ── PlaceOrder stubs (included for completeness; risk-service does not call PlaceOrder) ──
 
@@ -83,9 +83,9 @@ type PlaceOrderRequest struct {
 	ClientIp       string                 `protobuf:"bytes,8,opt,name=client_ip,json=clientIp,proto3" json:"client_ip,omitempty"`
 }
 
-func (x *PlaceOrderRequest) Reset()        {}
+func (x *PlaceOrderRequest) Reset()         {}
 func (x *PlaceOrderRequest) String() string { return x.UserId }
-func (x *PlaceOrderRequest) ProtoMessage() {}
+func (x *PlaceOrderRequest) ProtoMessage()  {}
 
 type PlaceOrderResponse struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
@@ -97,9 +97,9 @@ type PlaceOrderResponse struct {
 	MarginUsed     float64                `protobuf:"fixed64,6,opt,name=margin_used,json=marginUsed,proto3" json:"margin_used,omitempty"`
 }
 
-func (x *PlaceOrderResponse) Reset()        {}
+func (x *PlaceOrderResponse) Reset()         {}
 func (x *PlaceOrderResponse) String() string { return x.Status }
-func (x *PlaceOrderResponse) ProtoMessage() {}
+func (x *PlaceOrderResponse) ProtoMessage()  {}
 
 // ── Service client (risk-service only uses ForceLiquidate) ───────────────────
 

@@ -28,10 +28,13 @@ package redis
 import (
 	"context"
 	"fmt"
-	"log/slog"
+
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/livefxhub/risk-service/internal/logger"
+	"go.uber.org/zap"
 
 	goredis "github.com/redis/go-redis/v9"
 )
@@ -75,10 +78,10 @@ func (s *Subscriber) Start(ctx context.Context) {
 	for {
 		if err := s.run(ctx); err != nil {
 			if ctx.Err() != nil {
-				slog.Info("redis subscriber shutting down")
+				logger.Telemetry.Info("redis subscriber shutting down")
 				return
 			}
-			slog.Error("redis subscriber error, reconnecting in 2s", "error", err)
+			logger.Error.Error("redis subscriber error, reconnecting in 2s", zap.Error(err))
 			time.Sleep(2 * time.Second)
 		}
 	}
@@ -92,7 +95,7 @@ func (s *Subscriber) run(ctx context.Context) error {
 		return fmt.Errorf("redis PSubscribe confirmation: %w", err)
 	}
 
-	slog.Info("redis tick subscriber active", "pattern", "tick:*")
+	logger.Telemetry.Info("redis tick subscriber active", zap.String("pattern", "tick:*"))
 
 	ch := pubsub.Channel()
 
@@ -108,10 +111,10 @@ func (s *Subscriber) run(ctx context.Context) error {
 
 			tick, err := parseTick(msg.Channel, msg.Payload)
 			if err != nil {
-				slog.Warn("malformed tick payload",
-					"channel", msg.Channel,
-					"payload", msg.Payload,
-					"error", err,
+				logger.Error.Warn("malformed tick payload",
+					zap.String("channel", msg.Channel),
+					zap.String("payload", msg.Payload),
+					zap.Error(err),
 				)
 				continue
 			}
@@ -119,8 +122,8 @@ func (s *Subscriber) run(ctx context.Context) error {
 			select {
 			case s.TickCh <- tick:
 			default:
-				slog.Warn("tick channel full — dropping tick (processor lag?)",
-					"symbol", tick.Symbol,
+				logger.Error.Warn("tick channel full — dropping tick (processor lag?)",
+					zap.String("symbol", tick.Symbol),
 				)
 			}
 		}
@@ -149,9 +152,9 @@ func parseTick(channel, payload string) (Tick, error) {
 		// chunk = "GroupName:BID,ASK"
 		gp := strings.SplitN(chunk, ":", 2)
 		if len(gp) != 2 || gp[0] == "" || gp[1] == "" {
-			slog.Warn("skipping malformed group chunk in tick",
-				"symbol", symbol,
-				"chunk", chunk,
+			logger.Error.Warn("skipping malformed group chunk in tick",
+				zap.String("symbol", symbol),
+				zap.String("chunk", chunk),
 			)
 			continue
 		}
@@ -163,29 +166,29 @@ func parseTick(channel, payload string) (Tick, error) {
 		// High, Low, PctChange are for the frontend Fat Tick — ignored here.
 		prices := strings.Split(gp[1], ",")
 		if len(prices) < 2 {
-			slog.Warn("skipping malformed prices in group chunk",
-				"symbol", symbol,
-				"group", groupName,
-				"chunk", chunk,
+			logger.Error.Warn("skipping malformed prices in group chunk",
+				zap.String("symbol", symbol),
+				zap.String("group", groupName),
+				zap.String("chunk", chunk),
 			)
 			continue
 		}
 
 		bid, err := strconv.ParseFloat(strings.TrimSpace(prices[0]), 64)
 		if err != nil {
-			slog.Warn("skipping group: cannot parse bid",
-				"symbol", symbol, "group", groupName, "raw", prices[0])
+			logger.Error.Warn("skipping group: cannot parse bid",
+				zap.String("symbol", symbol), zap.String("group", groupName), zap.String("raw", prices[0]))
 			continue
 		}
 		ask, err := strconv.ParseFloat(strings.TrimSpace(prices[1]), 64)
 		if err != nil {
-			slog.Warn("skipping group: cannot parse ask",
-				"symbol", symbol, "group", groupName, "raw", prices[1])
+			logger.Error.Warn("skipping group: cannot parse ask",
+				zap.String("symbol", symbol), zap.String("group", groupName), zap.String("raw", prices[1]))
 			continue
 		}
 		if bid <= 0 || ask <= 0 || ask < bid {
-			slog.Warn("skipping group: invalid bid/ask values",
-				"symbol", symbol, "group", groupName, "bid", bid, "ask", ask)
+			logger.Error.Warn("skipping group: invalid bid/ask values",
+				zap.String("symbol", symbol), zap.String("group", groupName), zap.Float64("bid", bid), zap.Float64("ask", ask))
 			continue
 		}
 

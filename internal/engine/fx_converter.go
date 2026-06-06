@@ -28,8 +28,10 @@
 package engine
 
 import (
-	"log/slog"
 	"sync"
+
+	"github.com/livefxhub/risk-service/internal/logger"
+	"go.uber.org/zap"
 )
 
 // FxConverter is a thread-safe, RAM-resident exchange rate cache.
@@ -67,10 +69,11 @@ func (f *FxConverter) UpdateRate(symbol string, bid, ask float64) {
 // This is a pure RAM lookup — zero Redis I/O, zero allocation, ~20ns.
 //
 // Resolution logic:
-//   quoteCurrency == "USD"  → identity (EURUSD, BTCUSD, XAUUSD pairs)
-//   quoteCurrency is BASE   → multiply (GBPUSD: amount_gbp × gbpusd_rate)
-//   quoteCurrency is QUOTE  → divide   (USDJPY: amount_jpy ÷ usdjpy_rate)
-//   No rate found           → fallback: return amount + warn (startup only)
+//
+//	quoteCurrency == "USD"  → identity (EURUSD, BTCUSD, XAUUSD pairs)
+//	quoteCurrency is BASE   → multiply (GBPUSD: amount_gbp × gbpusd_rate)
+//	quoteCurrency is QUOTE  → divide   (USDJPY: amount_jpy ÷ usdjpy_rate)
+//	No rate found           → fallback: return amount + warn (startup only)
 func (f *FxConverter) ConvertToUSD(amount float64, quoteCurrency string) float64 {
 	// Fast path: PnL already in USD — covers EURUSD, AUDUSD, BTCUSD, XAUUSD.
 	if quoteCurrency == "USD" {
@@ -97,9 +100,9 @@ func (f *FxConverter) ConvertToUSD(amount float64, quoteCurrency string) float64
 	// Fallback: conversion pair not yet in cache (only happens in the first
 	// few seconds after process start, before that symbol's tick arrives).
 	// Return the raw amount to avoid a math panic; log once so ops can see it.
-	slog.Warn("FxConverter: conversion rate not cached, returning raw amount",
-		"quote_currency", quoteCurrency,
-		"amount",         amount,
+	logger.Telemetry.Warn("FxConverter: conversion rate not cached, returning raw amount",
+		zap.String("quote_currency", quoteCurrency),
+		zap.Float64("amount", amount),
 	)
 	return amount
 }

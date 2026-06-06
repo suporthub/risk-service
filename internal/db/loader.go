@@ -33,8 +33,10 @@ package db
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
+
+	"github.com/livefxhub/risk-service/internal/logger"
+	"go.uber.org/zap"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -53,8 +55,8 @@ type Loader struct {
 
 // NewLoader creates a Loader with connections to both databases.
 //
-//   userDSN  — PostgreSQL DSN for user_db  (live_users, user_profiles)
-//   orderDSN — PostgreSQL DSN for order_db (orders table)
+//	userDSN  — PostgreSQL DSN for user_db  (live_users, user_profiles)
+//	orderDSN — PostgreSQL DSN for order_db (orders table)
 func NewLoader(ctx context.Context, userDSN, orderDSN string) (*Loader, error) {
 	// ── user_db pool ──────────────────────────────────────────────────────────
 	// Small pool: used only for JIT balance loads and the boot-time wallet
@@ -63,10 +65,10 @@ func NewLoader(ctx context.Context, userDSN, orderDSN string) (*Loader, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse user db dsn: %w", err)
 	}
-	userCfg.MaxConns          = 5
-	userCfg.MinConns          = 1
-	userCfg.MaxConnLifetime   = 30 * time.Minute
-	userCfg.MaxConnIdleTime   = 5 * time.Minute
+	userCfg.MaxConns = 5
+	userCfg.MinConns = 1
+	userCfg.MaxConnLifetime = 30 * time.Minute
+	userCfg.MaxConnIdleTime = 5 * time.Minute
 	userCfg.HealthCheckPeriod = 1 * time.Minute
 
 	userPool, err := pgxpool.NewWithConfig(ctx, userCfg)
@@ -85,10 +87,10 @@ func NewLoader(ctx context.Context, userDSN, orderDSN string) (*Loader, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse order db dsn: %w", err)
 	}
-	orderCfg.MaxConns          = 3
-	orderCfg.MinConns          = 1
-	orderCfg.MaxConnLifetime   = 30 * time.Minute
-	orderCfg.MaxConnIdleTime   = 5 * time.Minute
+	orderCfg.MaxConns = 3
+	orderCfg.MinConns = 1
+	orderCfg.MaxConnLifetime = 30 * time.Minute
+	orderCfg.MaxConnIdleTime = 5 * time.Minute
 	orderCfg.HealthCheckPeriod = 1 * time.Minute
 
 	orderPool, err := pgxpool.NewWithConfig(ctx, orderCfg)
@@ -134,8 +136,8 @@ type SnapshotPosition struct {
 	TicketID     string
 	UserID       string
 	Symbol       string
-	GroupName    string  // spread-group name from orders.groupName
-	OrderSide    string  // "BUY" or "SELL"
+	GroupName    string // spread-group name from orders.groupName
+	OrderSide    string // "BUY" or "SELL"
 	Volume       float64
 	OpenPrice    float64
 	ContractSize float64 // from orders.contractSize; defaults to 100,000 if NULL
@@ -146,22 +148,23 @@ type SnapshotPosition struct {
 //
 // Algorithm (two sequential queries, one round-trip each):
 //
-//  Query 1 — OPEN positions (order_db):
-//    Reads every order with status = 'OPEN'.
-//    Collects the distinct set of userIDs encountered.
+//	Query 1 — OPEN positions (order_db):
+//	  Reads every order with status = 'OPEN'.
+//	  Collects the distinct set of userIDs encountered.
 //
-//  Query 2 — Wallet balances + contact details (user_db):
-//    Reads walletBalance, accountNumber, and email for the collected userIDs.
-//    Uses a single WHERE id = ANY($1) query — one round-trip regardless of
-//    how many users have open positions.
+//	Query 2 — Wallet balances + contact details (user_db):
+//	  Reads walletBalance, accountNumber, and email for the collected userIDs.
+//	  Uses a single WHERE id = ANY($1) query — one round-trip regardless of
+//	  how many users have open positions.
 //
 // Both queries run with a 30-second timeout. If either fails, the error is
 // returned and main.go must treat it as fatal (os.Exit(1)).
 //
 // Caller contract:
-//   MUST be called synchronously before any goroutine is started.
-//   The returned snapshot is used to populate the GlobalLedger and is then
-//   discarded — it is never stored in persistent state.
+//
+//	MUST be called synchronously before any goroutine is started.
+//	The returned snapshot is used to populate the GlobalLedger and is then
+//	discarded — it is never stored in persistent state.
 func (l *Loader) LoadAllActiveRisk(ctx context.Context) (*ActiveRiskSnapshot, error) {
 	// 30-second budget: covers cold DB caches and large position tables.
 	// In production with ~10,000 open positions this query completes in <200ms.
@@ -187,7 +190,7 @@ func (l *Loader) LoadAllActiveRisk(ctx context.Context) (*ActiveRiskSnapshot, er
 	// Note: "orderType" in order_db stores the FULL order type string
 	// (BUY, SELL, BUY_LIMIT…). For risk we only need BUY vs SELL (which open
 	// positions always are), so we map BUY*/SELL* → BUY/SELL via CASE.
-	slog.Info("eager snapshot: querying OPEN positions from order_db")
+	logger.Audit.Info("eager snapshot: querying OPEN positions from order_db")
 	posRows, err := l.orderPool.Query(qctx, `
 		SELECT
 			"orderId"                                                  AS ticket_id,
@@ -224,7 +227,7 @@ func (l *Loader) LoadAllActiveRisk(ctx context.Context) (*ActiveRiskSnapshot, er
 			&p.ContractSize,
 			&p.MarginUsed,
 		); err != nil {
-			slog.Warn("eager snapshot: skip malformed position row", "error", err)
+			logger.Error.Warn("eager snapshot: skip malformed position row", zap.Error(err))
 			continue
 		}
 		snapshot.Positions = append(snapshot.Positions, &p)
@@ -234,14 +237,14 @@ func (l *Loader) LoadAllActiveRisk(ctx context.Context) (*ActiveRiskSnapshot, er
 		return nil, fmt.Errorf("LoadAllActiveRisk: iterate position rows: %w", err)
 	}
 
-	slog.Info("eager snapshot: OPEN positions loaded",
-		"count",        len(snapshot.Positions),
-		"unique_users", len(userIDSet),
+	logger.Audit.Info("eager snapshot: OPEN positions loaded",
+		zap.Int("count", len(snapshot.Positions)),
+		zap.Int("unique_users", len(userIDSet)),
 	)
 
 	// If there are no open positions, skip the second query — nothing to load.
 	if len(userIDSet) == 0 {
-		slog.Info("eager snapshot: no open positions found — ledger will start empty")
+		logger.Audit.Info("eager snapshot: no open positions found — ledger will start empty")
 		return snapshot, nil
 	}
 
@@ -254,7 +257,7 @@ func (l *Loader) LoadAllActiveRisk(ctx context.Context) (*ActiveRiskSnapshot, er
 		userIDs = append(userIDs, id)
 	}
 
-	slog.Info("eager snapshot: querying wallet balances from user_db", "users", len(userIDs))
+	logger.Audit.Info("eager snapshot: querying wallet balances from user_db", zap.Int("users", len(userIDs)))
 	balRows, err := l.pool.Query(qctx, `
 		SELECT
 			lu.id,
@@ -278,18 +281,18 @@ func (l *Loader) LoadAllActiveRisk(ctx context.Context) (*ActiveRiskSnapshot, er
 			email         string
 		)
 		if err := balRows.Scan(&userID, &walletBalance, &accountNumber, &email); err != nil {
-			slog.Warn("eager snapshot: skip malformed balance row", "error", err)
+			logger.Error.Warn("eager snapshot: skip malformed balance row", zap.Error(err))
 			continue
 		}
-		snapshot.Balances[userID]       = walletBalance
+		snapshot.Balances[userID] = walletBalance
 		snapshot.AccountNumbers[userID] = accountNumber
-		snapshot.Emails[userID]         = email
+		snapshot.Emails[userID] = email
 	}
 	if err := balRows.Err(); err != nil {
 		return nil, fmt.Errorf("LoadAllActiveRisk: iterate balance rows: %w", err)
 	}
 
-	slog.Info("eager snapshot: wallet balances loaded", "count", len(snapshot.Balances))
+	logger.Audit.Info("eager snapshot: wallet balances loaded", zap.Int("count", len(snapshot.Balances)))
 	return snapshot, nil
 }
 
@@ -323,4 +326,3 @@ func (l *Loader) LoadUserDetails(ctx context.Context, userID string) (*model.Use
 	}
 	return &details, nil
 }
-

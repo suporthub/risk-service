@@ -28,9 +28,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strconv"
 	"time"
+
+	"github.com/livefxhub/risk-service/internal/logger"
+	"go.uber.org/zap"
 
 	kafka "github.com/segmentio/kafka-go"
 
@@ -120,7 +122,7 @@ func (c *KafkaConsumer) Start(ctx context.Context) {
 	go c.consumeLoop(ctx, topicOrdersExecuted, c.handleOrderExecuted)
 	go c.consumeLoop(ctx, topicOrdersClosed, c.handleOrderClosed)
 	go c.consumeLoop(ctx, topicWalletTransacts, c.handleWalletTransaction)
-	slog.Info("kafka consumer started", "brokers", c.brokers, "group", c.groupID)
+	logger.Telemetry.Info("kafka consumer started", zap.Strings("brokers", c.brokers), zap.String("group", c.groupID))
 }
 
 // consumeLoop is the generic reader loop used by both topics.
@@ -144,17 +146,17 @@ func (c *KafkaConsumer) consumeLoop(ctx context.Context, topic string, handler f
 	})
 	defer reader.Close()
 
-	slog.Info("kafka reader started", "topic", topic)
+	logger.Telemetry.Info("kafka reader started", zap.String("topic", topic))
 
 	for {
 		// FetchMessage blocks until a message is available or ctx is done.
 		msg, err := reader.FetchMessage(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				slog.Info("kafka reader shutting down", "topic", topic)
+				logger.Telemetry.Info("kafka reader shutting down", zap.String("topic", topic))
 				return
 			}
-			slog.Error("kafka fetch error", "topic", topic, "error", err)
+			logger.Error.Error("kafka fetch error", zap.String("topic", topic), zap.Error(err))
 			time.Sleep(2 * time.Second) // brief back-off before retrying
 			continue
 		}
@@ -162,10 +164,10 @@ func (c *KafkaConsumer) consumeLoop(ctx context.Context, topic string, handler f
 		if err := handler(msg.Value); err != nil {
 			// Log and commit anyway — a poison pill should not halt the consumer.
 			// In production, route to a dead-letter topic.
-			slog.Error("kafka message handler error",
-				"topic", topic,
-				"offset", msg.Offset,
-				"error", err,
+			logger.Error.Error("kafka message handler error",
+				zap.String("topic", topic),
+				zap.Int64("offset", msg.Offset),
+				zap.Error(err),
 			)
 		}
 
@@ -173,7 +175,7 @@ func (c *KafkaConsumer) consumeLoop(ctx context.Context, topic string, handler f
 		// This guarantees at-least-once delivery: if the service crashes mid-handler,
 		// the message will be re-delivered on restart.
 		if err := reader.CommitMessages(ctx, msg); err != nil {
-			slog.Warn("kafka commit failed", "topic", topic, "error", err)
+			logger.Error.Warn("kafka commit failed", zap.String("topic", topic), zap.Error(err))
 		}
 	}
 }
@@ -242,13 +244,13 @@ func (c *KafkaConsumer) handleOrderExecuted(data []byte) error {
 	user.Unlock()
 	c.ledger.Unlock()
 
-	slog.Info("position opened in risk ledger",
-		"ticket_id", evt.TicketID,
-		"user_id", evt.UserID,
-		"symbol", evt.Symbol,
-		"side", evt.OrderSide,
-		"volume", evt.Volume,
-		"margin_used", evt.MarginUsed,
+	logger.Audit.Info("position opened in risk ledger",
+		zap.String("ticket_id", evt.TicketID),
+		zap.String("user_id", evt.UserID),
+		zap.String("symbol", evt.Symbol),
+		zap.String("side", evt.OrderSide),
+		zap.Float64("volume", evt.Volume),
+		zap.Float64("margin_used", evt.MarginUsed),
 	)
 
 	return nil
@@ -285,9 +287,9 @@ func (c *KafkaConsumer) handleOrderClosed(data []byte) error {
 		// This can happen if the risk-service was restarted and the Kafka
 		// consumer is mid-replay: we may see a close before the open.
 		// In this case, there is no RAM state to clean up — log and skip.
-		slog.Warn("orders.closed for unknown user (replay gap?)",
-			"ticket_id", evt.TicketID,
-			"user_id", evt.UserID,
+		logger.Error.Warn("orders.closed for unknown user (replay gap?)",
+			zap.String("ticket_id", evt.TicketID),
+			zap.String("user_id", evt.UserID),
 		)
 		return nil
 	}
@@ -332,17 +334,17 @@ func (c *KafkaConsumer) handleOrderClosed(data []byte) error {
 					oldBalance := user.Balance
 					user.Balance = parsedBalance
 					if oldBalance != parsedBalance {
-						slog.Warn("balance drift corrected on portfolio empty",
-							"user_id", evt.UserID,
-							"old_balance", oldBalance,
-							"new_balance", parsedBalance,
+						logger.Audit.Warn("balance drift corrected on portfolio empty",
+							zap.String("user_id", evt.UserID),
+							zap.Float64("old_balance", oldBalance),
+							zap.Float64("new_balance", parsedBalance),
 						)
 					}
 				} else {
-					slog.Error("failed to parse balance from OrderClosedEvent",
-						"user_id", evt.UserID,
-						"raw_balance", evt.Balance,
-						"error", err,
+					logger.Error.Error("failed to parse balance from OrderClosedEvent",
+						zap.String("user_id", evt.UserID),
+						zap.String("raw_balance", evt.Balance),
+						zap.Error(err),
 					)
 				}
 			}
@@ -351,8 +353,8 @@ func (c *KafkaConsumer) handleOrderClosed(data []byte) error {
 			// liquidated again if they open new positions.
 			if user.IsLiquidating {
 				user.IsLiquidating = false
-				slog.Info("liquidation flag reset — all positions closed",
-					"user_id", evt.UserID,
+				logger.Audit.Info("liquidation flag reset — all positions closed",
+					zap.String("user_id", evt.UserID),
 				)
 			}
 		}
@@ -361,11 +363,11 @@ func (c *KafkaConsumer) handleOrderClosed(data []byte) error {
 	user.Unlock()
 	c.ledger.Unlock()
 
-	slog.Info("position closed in risk ledger",
-		"ticket_id", evt.TicketID,
-		"user_id", evt.UserID,
-		"realized_pnl", evt.RealizedPnL,
-		"margin_freed", evt.MarginReturn,
+	logger.Audit.Info("position closed in risk ledger",
+		zap.String("ticket_id", evt.TicketID),
+		zap.String("user_id", evt.UserID),
+		zap.Float64("realized_pnl", evt.RealizedPnL),
+		zap.Float64("margin_freed", evt.MarginReturn),
 	)
 
 	return nil
@@ -399,12 +401,12 @@ func (c *KafkaConsumer) handleWalletTransaction(data []byte) error {
 	switch evt.TransactionType {
 	case "DEPOSIT", "CREDIT":
 		user.Balance += evt.Amount
-		slog.Info("wallet credited in RAM", "user_id", evt.UserID, "amount", evt.Amount, "new_balance", user.Balance)
+		logger.Audit.Info("wallet credited in RAM", zap.String("user_id", evt.UserID), zap.Float64("amount", evt.Amount), zap.Float64("new_balance", user.Balance))
 	case "WITHDRAWAL":
 		user.Balance -= evt.Amount
-		slog.Info("wallet debited in RAM", "user_id", evt.UserID, "amount", evt.Amount, "new_balance", user.Balance)
+		logger.Audit.Info("wallet debited in RAM", zap.String("user_id", evt.UserID), zap.Float64("amount", evt.Amount), zap.Float64("new_balance", user.Balance))
 	default:
-		slog.Warn("unknown wallet transaction type", "type", evt.TransactionType)
+		logger.Error.Warn("unknown wallet transaction type", zap.String("type", evt.TransactionType))
 	}
 
 	return nil

@@ -17,8 +17,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"time"
+
+	"github.com/livefxhub/risk-service/internal/logger"
+	"go.uber.org/zap"
 
 	"github.com/google/uuid"
 	kafka "github.com/segmentio/kafka-go"
@@ -46,7 +48,7 @@ type NotificationEvent struct {
 // The engine package creates these and passes them to the dispatcher, which calls
 // the producer with this struct directly.
 type RiskNotificationTask struct {
-	Template      string  // "margin_call" | "auto_cutoff"
+	Template      string // "margin_call" | "auto_cutoff"
 	UserID        string
 	AccountNumber string
 	Email         string
@@ -128,11 +130,11 @@ func (p *KafkaProducer) PublishNotification(ctx context.Context, task RiskNotifi
 		return fmt.Errorf("write %s to kafka: %w", task.Template, err)
 	}
 
-	slog.Info("risk notification published",
-		"template",       task.Template,
-		"user_id",        task.UserID,
-		"account_number", task.AccountNumber,
-		"margin_level",   fmt.Sprintf("%.2f%%", task.MarginLevel),
+	logger.Telemetry.Info("risk notification published",
+		zap.String("template", task.Template),
+		zap.String("user_id", task.UserID),
+		zap.String("account_number", task.AccountNumber),
+		zap.String("margin_level", fmt.Sprintf("%.2f%%", task.MarginLevel)),
 	)
 	return nil
 }

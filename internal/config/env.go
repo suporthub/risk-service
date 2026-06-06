@@ -15,10 +15,12 @@
 package config
 
 import (
-	"log/slog"
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/livefxhub/risk-service/internal/logger"
+	"go.uber.org/zap"
 
 	"github.com/joho/godotenv"
 )
@@ -81,7 +83,7 @@ func Load() *Config {
 	// Load .env file if it exists (development). In production, env vars are
 	// injected by Kubernetes / Docker — the file won't be present and that is fine.
 	if err := godotenv.Load(); err != nil {
-		slog.Info("no .env file found — using OS environment variables only")
+		logger.Telemetry.Info("no .env file found — using OS environment variables only")
 	}
 
 	cfg := &Config{
@@ -97,12 +99,12 @@ func Load() *Config {
 		MetricsAddr:       envOrDefault("METRICS_ADDR", ":9090"),
 	}
 
-	slog.Info("risk-service config loaded",
-		"stop_out_pct",    cfg.StopOutPct,
-		"margin_call_pct", cfg.MarginCallPct,
-		"redis_nodes",    cfg.RedisNodes,
-		"kafka_brokers",   cfg.KafkaBrokers,
-		"grpc_addr",       cfg.ExecutionGRPCAddr,
+	logger.Telemetry.Info("risk-service config loaded",
+		zap.Float64("stop_out_pct", cfg.StopOutPct),
+		zap.Float64("margin_call_pct", cfg.MarginCallPct),
+		zap.Strings("redis_nodes", cfg.RedisNodes),
+		zap.Strings("kafka_brokers", cfg.KafkaBrokers),
+		zap.String("grpc_addr", cfg.ExecutionGRPCAddr),
 	)
 
 	return cfg
@@ -136,8 +138,8 @@ func parseFloat(key string, defaultVal float64) float64 {
 	}
 	f, err := strconv.ParseFloat(val, 64)
 	if err != nil {
-		slog.Warn("invalid float env var, using default",
-			"key", key, "value", val, "default", defaultVal)
+		logger.Error.Warn("invalid float env var, using default",
+			zap.String("key", key), zap.String("value", val), zap.Float64("default", defaultVal))
 		return defaultVal
 	}
 	return f

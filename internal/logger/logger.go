@@ -1,50 +1,67 @@
 package logger
 
 import (
-	"io"
-	"log/slog"
 	"os"
+	"path/filepath"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 var (
-	AppLog  *slog.Logger
-	RiskLog *slog.Logger
+	Audit     *zap.Logger
+	Telemetry *zap.Logger
+	Error     *zap.Logger
 )
 
 func Init() {
 	isFileLogging := os.Getenv("LOG_TO_FILE") == "true"
-
-	// Ensure local logs directory exists gracefully
+	logDir := "logs"
 	if isFileLogging {
-		_ = os.MkdirAll("logs", 0755)
+		_ = os.MkdirAll(logDir, 0755)
 	}
 
-	AppLog = newJSONLogger("system_telemetry", "logs/application.log", 50, 7, isFileLogging)
-	RiskLog = newJSONLogger("risk_ledger", "logs/risk-events.log", 50, 14, isFileLogging)
+	Audit = newZapLogger(filepath.Join(logDir, "risk-audit.log"), 100, 2555, isFileLogging)
+	Telemetry = newZapLogger(filepath.Join(logDir, "risk-telemetry.log"), 100, 14, isFileLogging)
+	Error = newZapLogger(filepath.Join(logDir, "risk-errors.log"), 100, 30, isFileLogging)
 }
 
-func newJSONLogger(streamTag, filename string, maxSize, maxAge int, isFileLogging bool) *slog.Logger {
-	var writer io.Writer = os.Stdout
+func newZapLogger(filename string, maxSize int, maxAge int, isFileLogging bool) *zap.Logger {
+	encoderConfig := zap.NewProductionEncoderConfig()
+	encoderConfig.TimeKey = "ts"
+	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	encoderConfig.MessageKey = "msg"
+
+	encoder := zapcore.NewJSONEncoder(encoderConfig)
+
+	var writeSyncer zapcore.WriteSyncer
 
 	if isFileLogging {
-		rollingFile := newRollingFile(filename, maxSize, maxAge)
-		writer = io.MultiWriter(os.Stdout, rollingFile)
+		lumberJackLogger := &lumberjack.Logger{
+			Filename:   filename,
+			MaxSize:    maxSize, // megabytes
+			MaxAge:     maxAge,  // days
+			MaxBackups: 0,
+			Compress:   true,
+		}
+		writeSyncer = zapcore.AddSync(lumberJackLogger)
+	} else {
+		writeSyncer = zapcore.AddSync(os.Stdout)
 	}
 
-	handler := slog.NewJSONHandler(writer, nil).WithAttrs([]slog.Attr{
-		slog.String("stream", streamTag),
-	})
-
-	return slog.New(handler)
+	core := zapcore.NewCore(encoder, writeSyncer, zap.DebugLevel)
+	return zap.New(core)
 }
 
-func newRollingFile(filename string, maxSize int, maxAge int) io.Writer {
-	return &lumberjack.Logger{
-		Filename: filename,
-		MaxSize:  maxSize, // Megabytes
-		MaxAge:   maxAge,  // Days
-		Compress: true,
+func Sync() {
+	if Audit != nil {
+		_ = Audit.Sync()
+	}
+	if Telemetry != nil {
+		_ = Telemetry.Sync()
+	}
+	if Error != nil {
+		_ = Error.Sync()
 	}
 }
