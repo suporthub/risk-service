@@ -17,7 +17,10 @@ var (
 
 func Init() {
 	isFileLogging := os.Getenv("LOG_TO_FILE") == "true"
-	logDir := "logs"
+	logDir := os.Getenv("LOG_DIR")
+	if logDir == "" {
+		logDir = "logs"
+	}
 	if isFileLogging {
 		_ = os.MkdirAll(logDir, 0755)
 	}

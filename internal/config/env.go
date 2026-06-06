@@ -73,6 +73,16 @@ type Config struct {
 
 	// MetricsAddr is the address where the metrics server listens.
 	MetricsAddr string
+
+	// ── Logging ────────────────────────────────────────────────────────────
+
+	// LogDir is the directory where log files are written.
+	// Default: "logs"
+	LogDir string
+
+	// LogToFile determines if logs are written to files (true) or stdout (false).
+	// Default: false
+	LogToFile bool
 }
 
 // Load reads configuration from the environment (and optionally .env file).
@@ -97,6 +107,8 @@ func Load() *Config {
 		DatabaseURL:       requireEnv("DATABASE_URL"),       // user_db: live_users, user_profiles
 		OrderDatabaseURL:  requireEnv("ORDER_DATABASE_URL"), // order_db: orders table
 		MetricsAddr:       envOrDefault("METRICS_ADDR", ":9090"),
+		LogDir:            envOrDefault("LOG_DIR", "logs"),
+		LogToFile:         os.Getenv("LOG_TO_FILE") == "true",
 	}
 
 	logger.Telemetry.Info("risk-service config loaded",
@@ -105,6 +117,8 @@ func Load() *Config {
 		zap.Strings("redis_nodes", cfg.RedisNodes),
 		zap.Strings("kafka_brokers", cfg.KafkaBrokers),
 		zap.String("grpc_addr", cfg.ExecutionGRPCAddr),
+		zap.String("log_dir", cfg.LogDir),
+		zap.Bool("log_to_file", cfg.LogToFile),
 	)
 
 	return cfg
