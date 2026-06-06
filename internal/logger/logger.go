@@ -48,7 +48,7 @@ func newZapLogger(filename string, maxSize int, maxAge int, isFileLogging bool) 
 			MaxBackups: 0,
 			Compress:   true,
 		}
-		writeSyncer = zapcore.AddSync(lumberJackLogger)
+		writeSyncer = zapcore.NewMultiWriteSyncer(zapcore.AddSync(os.Stdout), zapcore.AddSync(lumberJackLogger))
 	} else {
 		writeSyncer = zapcore.AddSync(os.Stdout)
 	}
