@@ -261,12 +261,21 @@ func (l *Loader) LoadAllActiveRisk(ctx context.Context) (*ActiveRiskSnapshot, er
 	balRows, err := l.pool.Query(qctx, `
 		SELECT
 			lu.id,
-			lu."walletBalance"::float8,
+			lu."walletBalance"::float8 AS wallet_balance,
 			lu."accountNumber",
 			COALESCE(up.email, '')  AS email
 		FROM live_users lu
 		LEFT JOIN user_profiles up ON up.id = lu."userProfileId"
 		WHERE lu.id = ANY($1::uuid[])
+		UNION ALL
+		SELECT
+			du.id,
+			du."demoBalance"::float8 AS wallet_balance,
+			du."accountNumber",
+			COALESCE(up.email, du.email, '') AS email
+		FROM demo_users du
+		LEFT JOIN user_profiles up ON up.id = du."userProfileId"
+		WHERE du.id = ANY($1::uuid[])
 	`, userIDs)
 	if err != nil {
 		return nil, fmt.Errorf("LoadAllActiveRisk: query wallet balances: %w", err)
@@ -311,16 +320,29 @@ func (l *Loader) LoadUserDetails(ctx context.Context, userID string) (*model.Use
 	var details model.UserDetails
 
 	err := l.pool.QueryRow(qctx, `
-		SELECT lu."walletBalance", lu."accountNumber", up.email 
+		SELECT lu."walletBalance", lu."accountNumber", COALESCE(up.email, '') AS email 
 		FROM live_users lu
-		JOIN user_profiles up ON lu."userProfileId" = up.id
+		LEFT JOIN user_profiles up ON lu."userProfileId" = up.id
 		WHERE lu.id = $1
 	`, userID).Scan(&details.Balance, &details.AccountNumber, &details.Email)
 
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			// Safe fallback: user may not yet have a profile row.
-			return &model.UserDetails{Balance: 0.0}, nil
+			// Try demo_users
+			demoErr := l.pool.QueryRow(qctx, `
+				SELECT du."demoBalance", du."accountNumber", COALESCE(up.email, du.email, '') AS email
+				FROM demo_users du
+				LEFT JOIN user_profiles up ON du."userProfileId" = up.id
+				WHERE du.id = $1
+			`, userID).Scan(&details.Balance, &details.AccountNumber, &details.Email)
+
+			if demoErr != nil {
+				if demoErr == pgx.ErrNoRows {
+					return &model.UserDetails{Balance: 0.0}, nil
+				}
+				return nil, demoErr
+			}
+			return &details, nil
 		}
 		return nil, err
 	}
