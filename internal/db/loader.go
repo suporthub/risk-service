@@ -133,15 +133,15 @@ type ActiveRiskSnapshot struct {
 // SnapshotPosition is one row from the open-position query.
 // Field names mirror RiskPosition exactly to simplify conversion.
 type SnapshotPosition struct {
-	TicketID     string
-	UserID       string
-	Symbol       string
-	GroupName    string // spread-group name from orders.groupName
-	OrderSide    string // "BUY" or "SELL"
-	Volume       float64
-	OpenPrice    float64
-	ContractSize float64 // from orders.contractSize; defaults to 100,000 if NULL
-	MarginUsed   float64 // from orders.marginUsed
+	TicketID      string
+	UserID        string
+	Symbol        string
+	GroupName     string // spread-group name from orders.groupName
+	OrderSide     string // "BUY" or "SELL"
+	Volume        float64
+	OpenPrice     float64
+	ContractValue float64 // from orders.contractValue
+	MarginUsed    float64 // from orders.marginUsed
 }
 
 // LoadAllActiveRisk performs the eager boot-time database snapshot.
@@ -200,7 +200,7 @@ func (l *Loader) LoadAllActiveRisk(ctx context.Context) (*ActiveRiskSnapshot, er
 			CASE WHEN "orderType"::text LIKE 'BUY%' THEN 'BUY' ELSE 'SELL' END AS order_side,
 			volume::float8,
 			COALESCE("openPrice",  0)::float8                         AS open_price,
-			COALESCE("contractSize", 100000)::float8                  AS contract_size,
+			COALESCE("contractValue", 0)::float8                      AS contract_value,
 			COALESCE("marginUsed", 0)::float8                         AS margin_used
 		FROM orders
 		WHERE status = 'OPEN'
@@ -224,10 +224,17 @@ func (l *Loader) LoadAllActiveRisk(ctx context.Context) (*ActiveRiskSnapshot, er
 			&p.OrderSide,
 			&p.Volume,
 			&p.OpenPrice,
-			&p.ContractSize,
+			&p.ContractValue,
 			&p.MarginUsed,
 		); err != nil {
 			logger.Error.Warn("eager snapshot: skip malformed position row", zap.Error(err))
+			continue
+		}
+		if p.ContractValue <= 0 {
+			logger.Error.Error("eager snapshot: CRITICAL skip. contract_value is 0 or NULL in order_db. Position cannot be monitored.",
+				zap.String("ticket_id", p.TicketID),
+				zap.String("symbol", p.Symbol),
+			)
 			continue
 		}
 		snapshot.Positions = append(snapshot.Positions, &p)

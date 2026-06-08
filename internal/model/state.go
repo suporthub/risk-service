@@ -58,10 +58,10 @@ type RiskPosition struct {
 	Symbol   string // e.g. "EURUSD", "XAUUSD"
 	Group    string // spread-group name (e.g. "Standard", "VIP") — used to select the correct
 	//   bid/ask from the multi-group tick payload; must match the pricing-service key.
-	OrderType    string  // "BUY" or "SELL"
-	Volume       float64 // lot size (e.g. 0.01, 1.0)
-	OpenPrice    float64 // execution fill price
-	ContractSize float64 // units per lot (e.g. 100,000 for FX majors, 100 for XAUUSD)
+	OrderType     string  // "BUY" or "SELL"
+	Volume        float64 // lot size (e.g. 0.01, 1.0)
+	OpenPrice     float64 // execution fill price
+	ContractValue float64 // total notional value of position (Volume * Instrument Contract Size)
 
 	// CurrentPnL caches the most recently calculated floating PnL for this
 	// position. It is updated on every tick that matches this symbol.
@@ -353,15 +353,15 @@ func (l *GlobalLedger) HydrateFromSnapshot(
 
 		// ── Build the RiskPosition and register it ─────────────────────────────
 		pos := &RiskPosition{
-			TicketID:     sp.TicketID,
-			UserID:       sp.UserID,
-			Symbol:       sp.Symbol,
-			Group:        sp.GroupName,
-			OrderType:    sp.OrderSide,
-			Volume:       sp.Volume,
-			OpenPrice:    sp.OpenPrice,
-			ContractSize: sp.ContractSize,
-			CurrentPnL:   0.0, // will be computed on first tick
+			TicketID:      sp.TicketID,
+			UserID:        sp.UserID,
+			Symbol:        sp.Symbol,
+			Group:         sp.GroupName,
+			OrderType:     sp.OrderSide,
+			Volume:        sp.Volume,
+			OpenPrice:     sp.OpenPrice,
+			ContractValue: sp.ContractValue,
+			CurrentPnL:    0.0, // will be computed on first tick
 		}
 
 		// Accumulate UsedMargin from the snapshot.
@@ -382,13 +382,13 @@ func (l *GlobalLedger) HydrateFromSnapshot(
 // model must not import db, but db imports model.
 // The db package fills this via a simple field copy.
 type SnapshotEntry struct {
-	TicketID     string
-	UserID       string
-	Symbol       string
-	GroupName    string
-	OrderSide    string
-	Volume       float64
-	OpenPrice    float64
-	ContractSize float64
-	MarginUsed   float64
+	TicketID      string
+	UserID        string
+	Symbol        string
+	GroupName     string
+	OrderSide     string
+	Volume        float64
+	OpenPrice     float64
+	ContractValue float64
+	MarginUsed    float64
 }

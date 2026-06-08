@@ -112,15 +112,15 @@ func main() {
 	entries := make([]model.SnapshotEntry, len(snapshot.Positions))
 	for i, sp := range snapshot.Positions {
 		entries[i] = model.SnapshotEntry{
-			TicketID:     sp.TicketID,
-			UserID:       sp.UserID,
-			Symbol:       sp.Symbol,
-			GroupName:    sp.GroupName,
-			OrderSide:    sp.OrderSide,
-			Volume:       sp.Volume,
-			OpenPrice:    sp.OpenPrice,
-			ContractSize: sp.ContractSize,
-			MarginUsed:   sp.MarginUsed,
+			TicketID:      sp.TicketID,
+			UserID:        sp.UserID,
+			Symbol:        sp.Symbol,
+			GroupName:     sp.GroupName,
+			OrderSide:     sp.OrderSide,
+			Volume:        sp.Volume,
+			OpenPrice:     sp.OpenPrice,
+			ContractValue: sp.ContractValue,
+			MarginUsed:    sp.MarginUsed,
 		}
 	}
 

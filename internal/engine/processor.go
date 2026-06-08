@@ -219,9 +219,9 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 
 		var newPnL float64
 		if pos.OrderType == "BUY" {
-			newPnL = (bid - pos.OpenPrice) * pos.ContractSize * pos.Volume
+			newPnL = (bid - pos.OpenPrice) * pos.ContractValue
 		} else { // "SELL"
-			newPnL = (pos.OpenPrice - ask) * pos.ContractSize * pos.Volume
+			newPnL = (pos.OpenPrice - ask) * pos.ContractValue
 		}
 
 		// Convert PnL to USD

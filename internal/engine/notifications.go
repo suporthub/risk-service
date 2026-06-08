@@ -54,8 +54,8 @@ func (p *Processor) SendMarginWarning(ctx context.Context, user *model.RiskUser,
 // TriggerAccountLiquidation fires liquidation tasks for a user's open positions
 // and issues exactly one LIQUIDATION_DIGEST. It also resets their margin warning cooldown.
 func (p *Processor) TriggerAccountLiquidation(ctx context.Context, user *model.RiskUser, marginLevel float64, equity float64) {
-	reason := fmt.Sprintf("STOP_OUT:%.2f%% (equity=%.2f used_margin=%.2f threshold=%.1f%%)",
-		marginLevel, equity, user.UsedMargin, p.cfg.StopOutPct)
+	reason := fmt.Sprintf("STOP_OUT:%.2f%% (balance=%.2f equity=%.2f used_margin=%.2f threshold=%.1f%%)",
+		marginLevel, user.Balance, equity, user.UsedMargin, p.cfg.StopOutPct)
 
 	closedCount := 0
 	var totalLoss float64

@@ -61,24 +61,30 @@ type OrderExecutedEvent struct {
 	Symbol            string    `json:"symbol"`
 	OrderSide         string    `json:"order_side"` // "BUY" or "SELL"
 	Volume            float64   `json:"volume,string"`
-	ContractSize      float64   `json:"contract_size,string"`
+	ContractValue     float64   `json:"contract_value,string"`
 	ExecutionPrice    float64   `json:"execution_price,string"`
 	MarginUsed        float64   `json:"margin_used,string"`        // margin delta locked (USD)
 	CommissionCharged float64   `json:"commission_charged,string"` // already deducted from Balance
 	ClientIP          string    `json:"client_ip"`
 	ExecutedAt        time.Time `json:"executed_at"`
+
+	// Authoritative portfolio state from the execution-engine RAM ledger.
+	// Used to sync the risk-service's Balance and UsedMargin with the SoT.
+	Balance         string `json:"balance"`           // post-trade balance (stringified decimal)
+	UsedMarginTotal string `json:"used_margin_total"` // total used margin after this trade (stringified decimal)
 }
 
 // OrderClosedEvent is the payload on the orders.closed topic.
 // Published by the execution-service after a position is closed (any reason).
 type OrderClosedEvent struct {
-	TicketID     string    `json:"ticket_id"`
-	UserID       string    `json:"user_id"`
-	Symbol       string    `json:"symbol"`
-	RealizedPnL  float64   `json:"realized_pnl,string"`  // final profit/loss in USD
-	MarginReturn float64   `json:"margin_return,string"` // margin being freed (USD)
-	Balance      string    `json:"balance"`              // definitive post-trade balance from execution-engine (stringified decimal)
-	ClosedAt     time.Time `json:"closed_at"`
+	TicketID        string    `json:"ticket_id"`
+	UserID          string    `json:"user_id"`
+	Symbol          string    `json:"symbol"`
+	RealizedPnL     float64   `json:"realized_pnl,string"`  // final profit/loss in USD
+	MarginReturn    float64   `json:"margin_return,string"` // margin being freed (USD)
+	Balance         string    `json:"balance"`              // definitive post-trade balance from execution-engine (stringified decimal)
+	UsedMarginTotal string    `json:"used_margin_total"`    // total used margin after this close (stringified decimal)
+	ClosedAt        time.Time `json:"closed_at"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -211,19 +217,23 @@ func (c *KafkaConsumer) handleOrderExecuted(data []byte) error {
 
 	// Build the RiskPosition from the event.
 	pos := &model.RiskPosition{
-		TicketID:     evt.TicketID,
-		UserID:       evt.UserID, // back-reference: lets tick processor do O(1) user lookup from SymbolIndex
-		Symbol:       evt.Symbol,
-		Group:        evt.GroupName, // spread-group: selects correct bid/ask from multi-group tick payload
-		OrderType:    evt.OrderSide,
-		Volume:       evt.Volume,
-		OpenPrice:    evt.ExecutionPrice,
-		ContractSize: evt.ContractSize,
-		CurrentPnL:   0.0, // starts at zero; updated on first tick
+		TicketID:      evt.TicketID,
+		UserID:        evt.UserID, // back-reference: lets tick processor do O(1) user lookup from SymbolIndex
+		Symbol:        evt.Symbol,
+		Group:         evt.GroupName, // spread-group: selects correct bid/ask from multi-group tick payload
+		OrderType:     evt.OrderSide,
+		Volume:        evt.Volume,
+		OpenPrice:     evt.ExecutionPrice,
+		ContractValue: evt.ContractValue,
+		CurrentPnL:    0.0, // starts at zero; updated on first tick
 	}
 
-	if pos.ContractSize == 0 {
-		pos.ContractSize = ContractSizeDefault // Fallback for older events in queue
+	if pos.ContractValue <= 0 {
+		logger.Error.Error("REJECTING position: contract_value is 0 or missing. Risk engine cannot compute PnL safely.",
+			zap.String("ticket_id", evt.TicketID),
+			zap.String("symbol", evt.Symbol),
+		)
+		return fmt.Errorf("orders.executed: invalid contract_value for ticket %s", evt.TicketID)
 	}
 
 	// Acquire both locks in a consistent order to prevent deadlock:
@@ -231,12 +241,54 @@ func (c *KafkaConsumer) handleOrderExecuted(data []byte) error {
 	c.ledger.Lock() // GlobalLedger write-lock (to mutate SymbolIndex)
 	user.Lock()     // per-user write-lock (to mutate Balance, UsedMargin, Positions)
 
-	// Deduct the commission that the execution-service already charged.
-	// We reflect this in the risk ledger so Equity stays accurate.
-	user.Balance -= evt.CommissionCharged
+	// ── Authoritative Balance Sync ─────────────────────────────────────────
+	// The execution-engine RAM ledger is the single source of truth for
+	// Balance and UsedMargin. Instead of applying incremental deltas
+	// (commission deduction, margin addition) to a potentially stale
+	// JIT-loaded DB value, we sync directly from the execution-engine's
+	// authoritative post-trade snapshot.
+	//
+	// This eliminates the "stale JIT balance" bug that caused false
+	// auto-cutoffs: if the risk-service loaded a stale balance from the DB
+	// (e.g. before a recent deposit was persisted), all subsequent margin
+	// level calculations would be wrong.
+	if evt.Balance != "" {
+		if parsedBal, err := strconv.ParseFloat(evt.Balance, 64); err == nil {
+			oldBalance := user.Balance
+			user.Balance = parsedBal
+			if oldBalance != parsedBal {
+				logger.Audit.Info("balance synced from execution-engine on order open",
+					zap.String("user_id", evt.UserID),
+					zap.Float64("old_balance", oldBalance),
+					zap.Float64("new_balance", parsedBal),
+				)
+			}
+		} else {
+			logger.Error.Error("failed to parse balance from OrderExecutedEvent — falling back to incremental",
+				zap.String("user_id", evt.UserID),
+				zap.String("raw_balance", evt.Balance),
+				zap.Error(err),
+			)
+			// Fallback: apply commission delta if we can't parse the authoritative balance.
+			user.Balance -= evt.CommissionCharged
+		}
+	} else {
+		// Legacy event without Balance field — apply commission delta.
+		user.Balance -= evt.CommissionCharged
+	}
 
-	// Lock the margin for this position.
-	user.UsedMargin += evt.MarginUsed
+	// Sync UsedMargin from execution-engine's authoritative total.
+	if evt.UsedMarginTotal != "" {
+		if parsedMargin, err := strconv.ParseFloat(evt.UsedMarginTotal, 64); err == nil {
+			user.UsedMargin = parsedMargin
+		} else {
+			// Fallback: increment margin delta.
+			user.UsedMargin += evt.MarginUsed
+		}
+	} else {
+		// Legacy event without UsedMarginTotal field — apply delta.
+		user.UsedMargin += evt.MarginUsed
+	}
 
 	// Register position in both lookup structures (shared pointer).
 	c.ledger.AddPosition(user, pos)
@@ -251,6 +303,8 @@ func (c *KafkaConsumer) handleOrderExecuted(data []byte) error {
 		zap.String("side", evt.OrderSide),
 		zap.Float64("volume", evt.Volume),
 		zap.Float64("margin_used", evt.MarginUsed),
+		zap.String("synced_balance", evt.Balance),
+		zap.String("synced_used_margin", evt.UsedMarginTotal),
 	)
 
 	return nil
@@ -304,48 +358,75 @@ func (c *KafkaConsumer) handleOrderClosed(data []byte) error {
 		// being converted to realized PnL reflected in Balance.
 		user.TotalFloatingPnL -= removedPos.CurrentPnL
 
-		// Free the margin that was locked for this position.
-		user.UsedMargin -= evt.MarginReturn
-		if user.UsedMargin < 0 {
-			user.UsedMargin = 0 // guard against float64 underflow
+		// ── Authoritative Balance + Margin Sync ────────────────────────────
+		// Always prefer the execution-engine's post-trade values over
+		// incremental delta math. This prevents cumulative drift.
+		if evt.Balance != "" {
+			if parsedBalance, err := strconv.ParseFloat(evt.Balance, 64); err == nil {
+				oldBalance := user.Balance
+				user.Balance = parsedBalance
+				if oldBalance != parsedBalance {
+					logger.Audit.Info("balance synced from execution-engine on order close",
+						zap.String("user_id", evt.UserID),
+						zap.String("ticket_id", evt.TicketID),
+						zap.Float64("old_balance", oldBalance),
+						zap.Float64("new_balance", parsedBalance),
+					)
+				}
+			} else {
+				logger.Error.Error("failed to parse balance from OrderClosedEvent — falling back to incremental",
+					zap.String("user_id", evt.UserID),
+					zap.String("raw_balance", evt.Balance),
+					zap.Error(err),
+				)
+				// Fallback: apply PnL delta.
+				user.Balance += evt.RealizedPnL
+			}
+		} else {
+			// Legacy event without Balance field.
+			user.Balance += evt.RealizedPnL
 		}
 
-		// Credit the realized PnL to the wallet balance.
-		user.Balance += evt.RealizedPnL
+		if evt.UsedMarginTotal != "" {
+			if parsedMargin, err := strconv.ParseFloat(evt.UsedMarginTotal, 64); err == nil {
+				user.UsedMargin = parsedMargin
+			} else {
+				// Fallback: subtract margin delta.
+				user.UsedMargin -= evt.MarginReturn
+				if user.UsedMargin < 0 {
+					user.UsedMargin = 0
+				}
+			}
+		} else {
+			// Legacy event without UsedMarginTotal — apply delta.
+			user.UsedMargin -= evt.MarginReturn
+			if user.UsedMargin < 0 {
+				user.UsedMargin = 0
+			}
+		}
 
-		// ── Self-Healing Zeroing + Kafka-driven Balance Sync ─────────────
+		// ── Self-Healing Zeroing on Portfolio Empty ─────────────────────────
 		// When the portfolio is empty, clamp running totals to absolute zero.
 		// Even with perfect race guards, floating-point arithmetic can leave
 		// micro-fractions (e.g. 0.000000001) behind. Zeroing ensures the
 		// state machine stays pristine.
-		//
-		// Balance Sync: instead of querying PostgreSQL (which risks loading
-		// a stale pre-close balance due to replication lag between the
-		// persistence-worker and this consumer), we trust the definitive
-		// post-trade balance embedded in the OrderClosedEvent by the
-		// execution-engine — the single source of truth.
 		if len(user.Positions) == 0 {
 			user.UsedMargin = 0
 			user.TotalFloatingPnL = 0
 
-			// Sync balance from execution-engine's authoritative value.
+			// Final balance re-sync from execution-engine (already done above,
+			// but re-apply here to detect drift that may have accumulated
+			// during multi-position close sequences).
 			if evt.Balance != "" {
 				if parsedBalance, err := strconv.ParseFloat(evt.Balance, 64); err == nil {
-					oldBalance := user.Balance
-					user.Balance = parsedBalance
-					if oldBalance != parsedBalance {
+					if user.Balance != parsedBalance {
 						logger.Audit.Warn("balance drift corrected on portfolio empty",
 							zap.String("user_id", evt.UserID),
-							zap.Float64("old_balance", oldBalance),
+							zap.Float64("old_balance", user.Balance),
 							zap.Float64("new_balance", parsedBalance),
 						)
+						user.Balance = parsedBalance
 					}
-				} else {
-					logger.Error.Error("failed to parse balance from OrderClosedEvent",
-						zap.String("user_id", evt.UserID),
-						zap.String("raw_balance", evt.Balance),
-						zap.Error(err),
-					)
 				}
 			}
 
