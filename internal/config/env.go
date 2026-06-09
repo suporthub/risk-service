@@ -97,8 +97,8 @@ func Load() *Config {
 	}
 
 	cfg := &Config{
-		StopOutPct:        parseFloat("RISK_STOP_OUT_PCT", 50.0),
-		MarginCallPct:     parseFloat("RISK_MARGIN_CALL_PCT", 100.0),
+		StopOutPct:        parseFloat("RISK_STOP_OUT_PCT", 10.0),
+		MarginCallPct:     parseFloat("RISK_MARGIN_CALL_PCT", 50.0),
 		RedisNodes:        parseStringSlice("REDIS_NODES", ","),
 		RedisPassword:     os.Getenv("REDIS_PASSWORD"),
 		KafkaBrokers:      parseStringSlice("KAFKA_BROKERS", ","),
