@@ -255,7 +255,7 @@ func (p *Processor) processTick(tick redisSub.Tick) {
 				ctx := context.Background()
 				p.TriggerAccountLiquidation(ctx, user, marginLevel, equity)
 			}
-		} else if marginLevel <= p.cfg.MarginCallPct {
+		} else if !user.IsLiquidating && marginLevel <= p.cfg.MarginCallPct {
 			// ── MARGIN CALL WARNING ───────────────────────────────────────────
 			// Uses the Redis-backed Cooldown pattern via SetNX
 			ctx := context.Background()
